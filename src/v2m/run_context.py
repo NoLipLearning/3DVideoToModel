@@ -68,6 +68,43 @@ class RunContext:
         return ctx
 
     @classmethod
+    def at(
+        cls,
+        run_dir: Path,
+        *,
+        preset: str,
+        config_snapshot: dict[str, Any],
+        source_video: str | None = None,
+    ) -> RunContext:
+        """Create a new run rooted at an explicit directory, or attach to
+        an existing manifest already there.
+
+        `create()` always invents a fresh `runs/<timestamp>_<id>/` path,
+        which is what `v2m run` (M6) will use for full end-to-end
+        orchestration. Before that exists, the per-phase CLI commands
+        (`extract`, `sfm`, `dense`, ...) need to run and re-run against a
+        directory the *caller* names, while still getting manifest
+        bookkeeping for free -- that's what this gives them. Idempotent:
+        calling it twice on the same directory attaches to the same
+        manifest rather than resetting it.
+        """
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            return cls.resume(run_dir)
+
+        manifest = RunManifest(
+            run_id=run_dir.name,
+            created_at=datetime.now(UTC),
+            source_video=source_video,
+            preset=preset,
+            config=config_snapshot,
+        )
+        ctx = cls(run_dir, manifest)
+        ctx._make_dirs()
+        ctx.save()
+        return ctx
+
+    @classmethod
     def resume(cls, run_dir: Path) -> RunContext:
         manifest_path = run_dir / "manifest.json"
         if not manifest_path.exists():

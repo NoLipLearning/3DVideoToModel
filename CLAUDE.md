@@ -92,7 +92,7 @@ src/v2m/
 ## Milestone status
 
 - [x] M0 — scaffold, config, capability probe, `v2m doctor`
-- [ ] M1 — Phase 1: intelligent ingest
+- [x] M1 — Phase 1: intelligent ingest
 - [ ] M2 — Phase 2a: sparse SfM
 - [ ] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
 - [ ] M4 — Phase 3: raw mesh (Poisson)

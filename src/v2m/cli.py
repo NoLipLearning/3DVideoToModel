@@ -12,12 +12,19 @@ Milestone map (see docs/ARCHITECTURE.md Section 4 for detail):
   M8 - capture                        (guided live capture)
 """
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from v2m import capability
-from v2m.config import list_presets
+from v2m import run_context as rc
+from v2m.config import list_presets, load_config
+from v2m.errors import V2MError
+from v2m.logging_setup import setup_logging
+from v2m.phase1_ingest.extract import run_extract
+from v2m.types import PhaseName
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
@@ -146,9 +153,57 @@ def presets() -> None:
 
 
 @app.command()
-def extract(video: str, output: str = typer.Option(..., "--output", "-o")) -> None:
-    """Phase 1: extract a filtered frame set from a video. (M1)"""
-    _not_implemented("extract", "M1")
+def extract(
+    video: str,
+    output: str = typer.Option(..., "--output", "-o"),
+    preset: str = typer.Option("object", "--preset"),
+) -> None:
+    """Phase 1: extract a filtered frame set from a video."""
+    video_path = Path(video)
+    output_dir = Path(output)
+
+    if not video_path.exists():
+        console.print(f"[red]Video not found:[/red] {video_path}")
+        raise typer.Exit(code=1)
+
+    cfg = load_config(preset)
+    ctx = rc.RunContext.at(
+        output_dir,
+        preset=preset,
+        config_snapshot=cfg.model_dump(),
+        source_video=str(video_path),
+    )
+    if ctx.manifest.preset != preset:
+        console.print(
+            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
+            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach. Delete "
+            "the directory (or use a new one) to start fresh with a different preset."
+        )
+    setup_logging(run_log_path=ctx.log_path)
+
+    ctx.start_phase(PhaseName.INGEST, input_hash=rc.hash_file(video_path))
+    try:
+        summary = run_extract(video_path, ctx.run_dir, cfg.ingest)
+    except V2MError as exc:
+        ctx.fail_phase(PhaseName.INGEST, exc.message)
+        console.print(f"[red]Ingest failed:[/red] {exc.message}")
+        if exc.remedy:
+            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
+        raise typer.Exit(code=1) from exc
+
+    ctx.complete_phase(PhaseName.INGEST, artifacts={"frames_json": summary.frames_json_path})
+
+    table = Table(title="Ingest summary")
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    table.add_row("Total frames decoded", str(summary.total_frames))
+    table.add_row("Accepted", f"[green]{summary.accepted}[/green]")
+    table.add_row("Rejected: blur", str(summary.rejected_blur))
+    table.add_row("Rejected: redundant", str(summary.rejected_redundant))
+    table.add_row("Rejected: frame budget", str(summary.rejected_budget))
+    table.add_row("Blur threshold used", f"{summary.blur_threshold:.1f}")
+    console.print(table)
+    console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
 @app.command(name="sfm")

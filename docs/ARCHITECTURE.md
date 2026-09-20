@@ -243,7 +243,8 @@ Each milestone is independently runnable, independently testable, and ends in a 
 ### M1 — Phase 1: Intelligent ingest
 `video_reader.py`, `quality.py`, `selector.py`, `extract.py`.
 Adaptive blur threshold `max(30, 0.6×median(laplacian_var))`; ORB-overlap redundancy gate (keep when inlier overlap vs last-kept < 0.75); enforce frame budget by even temporal spread over survivors.
-**Verify:** `uv run v2m extract tests/fixtures/sample.mov -o runs/test` → `frames/` + `frames.json` with per-frame scores and a rejection reason for every dropped frame. Unit-test blur scoring on synthetic sharp/blurred pairs.
+**Verify:** `uv run v2m extract tests/fixtures/sample.mp4 -o runs/test` → `frames/` + `frames.json` with per-frame scores and a rejection reason for every dropped frame. Unit-test blur scoring on synthetic sharp/blurred pairs.
+(Built as `tests/fixtures/make_synthetic_video.py`: a camera orbiting a 200mm textured cube, with deliberately injected blurred and held-still/duplicate frames plus a ground-truth JSON -- `.mp4`/mp4v rather than the `.mov` named above, since OpenCV muxes it far more reliably on Linux; any real container works identically through `video_reader.py`.)
 
 ### M2 — Phase 2a: Sparse SfM
 `colmap_backend.py`, `sfm.py`, `diagnostics.py`. Sequential + loop-detection matching, incremental mapper, `image_undistorter`, export poses to `cameras.json`, sparse cloud to `sparse.ply`.

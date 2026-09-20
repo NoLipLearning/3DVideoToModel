@@ -54,3 +54,15 @@ def test_fail_phase_records_error(isolated_runs_root):
 def test_resume_without_manifest_raises(tmp_path):
     with pytest.raises(ResumeError):
         rc.RunContext.resume(tmp_path / "nonexistent")
+
+
+def test_at_creates_then_attaches_idempotently(tmp_path):
+    run_dir = tmp_path / "myrun"
+    ctx1 = rc.RunContext.at(run_dir, preset="object", config_snapshot={"mode": "object"})
+    ctx1.start_phase(PhaseName.INGEST)
+    ctx1.complete_phase(PhaseName.INGEST, artifacts={"frames_json": "frames/frames.json"})
+
+    ctx2 = rc.RunContext.at(run_dir, preset="object", config_snapshot={"mode": "object"})
+    assert ctx2.manifest.run_id == ctx1.manifest.run_id
+    assert ctx2.manifest.phases[PhaseName.INGEST].status == PhaseStatus.COMPLETE
+    assert ctx2.manifest.phases[PhaseName.INGEST].artifacts["frames_json"] == "frames/frames.json"

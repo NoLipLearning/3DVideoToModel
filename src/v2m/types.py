@@ -76,7 +76,12 @@ class RunManifest(BaseModel):
 
 
 class FrameRecord(BaseModel):
-    """One candidate frame from Phase 1. Populated starting at M1."""
+    """One candidate frame from Phase 1. Populated starting at M1.
+
+    `path` is the filename inside `frames/` (e.g. "000000.jpg") for an
+    accepted frame -- an empty string for a rejected one, which is never
+    written to disk.
+    """
 
     path: str
     frame_index: int
@@ -84,6 +89,20 @@ class FrameRecord(BaseModel):
     laplacian_var: float
     accepted: bool
     reject_reason: str | None = None
+
+
+class IngestSummary(BaseModel):
+    """Returned by `phase1_ingest.extract.run_extract()`; the CLI attaches
+    it to the manifest's INGEST phase artifacts. Introduced at M1.
+    """
+
+    total_frames: int
+    accepted: int
+    rejected_blur: int
+    rejected_redundant: int
+    rejected_budget: int
+    blur_threshold: float
+    frames_json_path: str
 
 
 class SfmResult(BaseModel):
