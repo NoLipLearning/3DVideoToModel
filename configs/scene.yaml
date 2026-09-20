@@ -1,0 +1,17 @@
+# SCENE preset: large-area capture (street, room, facade).
+#
+# The ground becomes a printable slab rather than a flat cut (see
+# docs/ARCHITECTURE.md Section 3.3), texture is typically sparser so CLAHE
+# and a larger frame budget are turned on, and the TSDF voxel size is
+# coarsened 5x to fit a much larger volume in the same memory budget.
+mode: scene
+
+ingest:
+  frame_budget: 300
+
+sfm:
+  use_clahe: true
+
+dense:
+  tsdf_voxel_size_m: 0.02
+  tsdf_sdf_trunc_m: 0.06

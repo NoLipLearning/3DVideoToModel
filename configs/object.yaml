@@ -1,0 +1,6 @@
+# OBJECT preset: single subject, orbited by the camera, closed flat bottom.
+#
+# default.yaml is already object-shaped (frame budget, TSDF voxel size,
+# etc. all match a small-subject capture), so this file exists mainly to
+# make `--preset object` explicit rather than implicit.
+mode: object

@@ -1,0 +1,14 @@
+# FAST preset: quick preview.
+#
+# Sparse-only reconstruction (no depth model, no TSDF), lower resolution,
+# smaller face budget. Useful for checking that a capture is good enough
+# before committing to a full run.
+dense:
+  backend: sparse_only
+
+ingest:
+  frame_budget: 60
+  resolution_cap_px: 800
+
+mesh:
+  max_faces: 50000

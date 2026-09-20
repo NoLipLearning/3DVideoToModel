@@ -1,0 +1,61 @@
+# Base configuration for the v2m pipeline.
+#
+# Every value here is documented and justified in docs/ARCHITECTURE.md,
+# Sections 2 and 3. Presets (object.yaml, scene.yaml, fast.yaml) override a
+# small number of these keys; see load_config() in src/v2m/config.py for
+# the merge order (default.yaml -> <preset>.yaml -> CLI overrides).
+
+mode: object
+
+ingest:
+  frame_budget: 150              # hard cap after quality filtering (object preset value)
+  resolution_cap_px: 1600        # downscale longest edge before SfM
+  blur_min_threshold: 30.0       # floor for the adaptive Laplacian-variance cutoff
+  blur_adaptive_factor: 0.6      # threshold = max(blur_min_threshold, factor * median(laplacian_var))
+  redundancy_overlap_max: 0.75   # keep a frame only when ORB-inlier overlap vs. the last kept frame is below this
+  use_pyav: true                 # PyAV reads iPhone rotation metadata + VFR correctly; falls back to OpenCV if absent
+
+sfm:
+  sift_peak_threshold: 0.0066        # COLMAP/pycolmap default
+  sift_peak_threshold_retry: 0.002   # lowered on a retry pass over low-texture frames
+  sift_max_num_features: 8192
+  min_keypoints_per_image: 600       # below this, a frame is flagged as low-texture
+  matching_overlap: 10               # sequential matcher window
+  loop_detection: true               # vocabulary-tree loop closure
+  exhaustive_matching_max_images: 80 # never go exhaustive above this frame count
+  registration_rate_min: 0.7         # below this, the run is flagged as poorly reconstructed
+  mean_track_length_min: 3.0
+  use_clahe: false                   # forced true by the `scene` preset
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: 8
+  min_triangulation_angle_deg: 2.0   # below this: likely pure rotation ("you spun in place, didn't walk around it")
+
+dense:
+  # auto | monodepth_tsdf | openmvs | sparse_only
+  # "auto" resolves via capability.Capabilities.dense_backend -- on Apple
+  # Silicon (no CUDA, ever) this always resolves to monodepth_tsdf.
+  backend: auto
+  depth_model: depth-anything/Depth-Anything-V2-Small-hf
+  min_alignment_correspondences: 30    # sparse points needed to fit the relative-depth-to-metric affine
+  tsdf_voxel_size_m: 0.004             # 4 mm; scene preset overrides to 0.02 (2 cm)
+  tsdf_sdf_trunc_m: 0.02
+  poisson_point_threshold: 2000000     # switch Poisson depth 10 -> 11 above this point count
+  poisson_depth_low: 10
+  poisson_depth_high: 11
+  scene_tile_threshold_m: 30.0         # bbox diagonal above this triggers spatial tiling (scene mode, M9)
+  openmvs_cuda_device: -2              # -2 forces CPU in OpenMVS; never change without a real CUDA target
+
+mesh:
+  poisson_density_quantile_crop: 0.03  # trim the lowest-confidence 3% of Poisson vertices by density
+  max_faces: 300000
+  min_component_volume_ratio: 0.01     # drop floating components smaller than this fraction of the largest
+
+print_prep:
+  ground_ransac_distance_multiplier: 2.0   # x voxel size
+  ground_ransac_n: 3
+  ground_ransac_iterations: 1000
+  ground_min_inlier_ratio: 0.15
+  slab_thickness_mm: 3.0                   # printable base thickness for scene mode
+  max_hole_size_triangles: 1000            # largest hole the repair ladder attempts to fill directly (rung 3)
+  scale_target_size_mm: 150.0              # fallback scale target when no metric reference is available
+  build_volume_mm: [220.0, 220.0, 250.0]   # generic FDM printer; override to match your actual printer

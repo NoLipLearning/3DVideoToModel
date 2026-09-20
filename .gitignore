@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+.venv*/
+build/
+dist/
+
+# uv
+.uv-cache/
+uv.lock.bak
+
+# Pipeline runtime artifacts -- never commit run outputs or downloaded models
+runs/
+models/
+*.ply
+*.stl
+*.obj
+*.glb
+!tests/fixtures/**/*.obj
+
+# Pytest / coverage / ruff
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
