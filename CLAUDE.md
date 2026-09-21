@@ -88,12 +88,26 @@ src/v2m/
   Boolean half-space cut via `manifold3d` (Section 3.3) guarantees
   manifold output; ad-hoc hole-filling is where these pipelines usually
   break.
+- **Verify pycolmap's API against the actually-installed version before
+  writing code against it.** The modern `colmap/colmap/python` bindings
+  (what `pip install pycolmap` gives you now) are a different, cleaner
+  API than the deprecated `colmap/pycolmap` package's — top-level
+  functions like `extract_features`/`match_exhaustive`/
+  `incremental_mapping`, `Database.open(path)` as a classmethod, methods
+  like `image.cam_from_world()` that look like properties but aren't.
+  Training-data recall of "pycolmap" is likely to be the old API. `import
+  pycolmap; help(pycolmap.the_thing)` first.
+- **COLMAP's vocab-tree loop detection needs a file this sandbox cannot
+  download** (`demuc.de` is network-policy-blocked, confirmed directly).
+  It degrades to sequential-only matching with a logged warning; set
+  `V2M_VOCAB_TREE_PATH` to enable it for real on a machine that can reach
+  COLMAP's site.
 
 ## Milestone status
 
 - [x] M0 — scaffold, config, capability probe, `v2m doctor`
 - [x] M1 — Phase 1: intelligent ingest
-- [ ] M2 — Phase 2a: sparse SfM
+- [x] M2 — Phase 2a: sparse SfM
 - [ ] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
 - [ ] M4 — Phase 3: raw mesh (Poisson)
 - [ ] M5 — Phase 4: print-ready post-processing (the critical milestone)

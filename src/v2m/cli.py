@@ -12,6 +12,7 @@ Milestone map (see docs/ARCHITECTURE.md Section 4 for detail):
   M8 - capture                        (guided live capture)
 """
 
+import json
 from pathlib import Path
 
 import typer
@@ -24,6 +25,7 @@ from v2m.config import list_presets, load_config
 from v2m.errors import V2MError
 from v2m.logging_setup import setup_logging
 from v2m.phase1_ingest.extract import run_extract
+from v2m.phase2_sfm.sfm import run_sparse_sfm
 from v2m.types import PhaseName
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -207,9 +209,63 @@ def extract(
 
 
 @app.command(name="sfm")
-def sfm_cmd(frames_dir: str) -> None:
-    """Phase 2a: sparse structure-from-motion. (M2)"""
-    _not_implemented("sfm", "M2")
+def sfm_cmd(
+    run_dir: str,
+    preset: str = typer.Option("object", "--preset"),
+) -> None:
+    """Phase 2a: sparse structure-from-motion. Expects frames/ already populated by `extract`."""
+    output_dir = Path(run_dir)
+
+    cfg = load_config(preset)
+    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
+    if ctx.manifest.preset != preset:
+        console.print(
+            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
+            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
+        )
+    setup_logging(run_log_path=ctx.log_path)
+
+    ctx.start_phase(PhaseName.SFM_SPARSE)
+    try:
+        result = run_sparse_sfm(ctx.frames_dir, ctx.sfm_dir, cfg.sfm)
+    except V2MError as exc:
+        ctx.fail_phase(PhaseName.SFM_SPARSE, exc.message)
+        console.print(f"[red]Sparse SfM failed:[/red] {exc.message}")
+        if exc.remedy:
+            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
+        console.print(f"See {ctx.sfm_dir / 'diagnostics.json'} for details.")
+        raise typer.Exit(code=1) from exc
+
+    ctx.complete_phase(
+        PhaseName.SFM_SPARSE,
+        artifacts={
+            "sparse_points": result.sparse_points_path,
+            "cameras": result.cameras_path,
+        },
+    )
+
+    table = Table(title="Sparse SfM summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    registration_rate = (
+        result.num_images_registered / result.num_images_total if result.num_images_total else 0.0
+    )
+    table.add_row(
+        "Registered images",
+        f"[green]{result.num_images_registered}/{result.num_images_total}[/green] "
+        f"({registration_rate:.0%})",
+    )
+    table.add_row("Mean reprojection error", f"{result.mean_reprojection_error_px:.3f} px")
+    table.add_row("Mean track length", f"{result.mean_track_length:.2f}")
+    console.print(table)
+
+    diagnostics_path = ctx.sfm_dir / "diagnostics.json"
+    if diagnostics_path.exists():
+        diagnostics = json.loads(diagnostics_path.read_text())
+        for warning in diagnostics.get("warnings", []):
+            console.print(f"[yellow]Warning:[/yellow] {warning}")
+
+    console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
 @app.command()

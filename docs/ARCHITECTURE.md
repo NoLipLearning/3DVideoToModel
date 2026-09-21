@@ -247,8 +247,16 @@ Adaptive blur threshold `max(30, 0.6×median(laplacian_var))`; ORB-overlap redun
 (Built as `tests/fixtures/make_synthetic_video.py`: a camera orbiting a 200mm textured cube, with deliberately injected blurred and held-still/duplicate frames plus a ground-truth JSON -- `.mp4`/mp4v rather than the `.mov` named above, since OpenCV muxes it far more reliably on Linux; any real container works identically through `video_reader.py`.)
 
 ### M2 — Phase 2a: Sparse SfM
-`colmap_backend.py`, `sfm.py`, `diagnostics.py`. Sequential + loop-detection matching, incremental mapper, `image_undistorter`, export poses to `cameras.json`, sparse cloud to `sparse.ply`.
+`colmap_backend.py`, `sfm.py`, `diagnostics.py`. Exhaustive matching at/below `exhaustive_matching_max_images` (80) else sequential+loop-detection, incremental mapper, `undistort_images`, export poses to `cameras.json`, sparse cloud to `sparse.ply`.
 **Verify:** on the synthetic fixture, registration rate ≥ 0.9 and reprojection error < 1.5 px. Diagnostics JSON written even on failure.
+
+**Actually achieved on the fixture:** 52/53 images registered (98%), 0.41px mean reprojection error, 7.56 mean track length. Two implementation notes that turned out to matter:
+- **Exhaustive, not sequential, below the threshold.** Sequential-only matching (overlap=10) starved the incremental mapper of any wide-baseline pair on an orbiting-camera capture and produced a 2-image reconstruction. Exhaustive matching at this scale gives the mapper the widest choice of a good seed pair; it's what actually gets registration above 0.9. Sequential+loop-detection remains the path above the threshold, for the memory reasons in Section 3.2.
+- **Vocab-tree loop detection needs a file COLMAP doesn't ship and this project's sandbox can't download** (`demuc.de` is blocked by network policy, confirmed directly). `colmap_backend.py` checks `V2M_VOCAB_TREE_PATH`; without it, loop detection degrades to plain sequential matching with a logged warning, same posture as pymeshlab/OpenMVS elsewhere in this doc.
+
+The winning reconstruction is written to `sfm/sparse/final/` (not the illustrative `sparse/0/` above) — after a Section 3.1 retry, the actual winner may not be "0" from either attempt, so `sfm.py` always writes the one it chose to an unambiguous, stable path. `cameras.json`'s rotation is a quaternion in **(x, y, z, w)** order (Eigen/COLMAP convention); `cam_from_world` maps `p_cam = R @ p_world + t`.
+
+The M1 synthetic fixture needed real rework to be SfM-viable — see `tests/fixtures/make_synthetic_video.py`'s module docstring for the three failed attempts and why (in short: SIFT keys off grayscale gradients, not hue; sparse discrete points don't give the mapper enough growable 3D structure regardless of per-point texture; and per-pixel random noise is statistically self-similar and produces false correspondences that fail PnP RANSAC. What worked: real per-face texture, homography-warped onto each face's actual 3D quad, using a sparse scatter of distinctly-sized/colored/positioned shapes rather than noise).
 
 ### M3 — Phase 2b: Dense point cloud
 `dense/base.py`, `sparse_only.py` first (trivial, unblocks M4), then `monodepth_tsdf.py` — depth inference, robust affine alignment to sparse points, TSDF integration, `dense.ply`.

@@ -116,6 +116,32 @@ class SfmResult(BaseModel):
     cameras_path: str
 
 
+class LowKeypointImage(BaseModel):
+    """One image flagged by diagnostics for too little texture to key off
+    of (docs/ARCHITECTURE.md Section 3.1)."""
+
+    name: str
+    keypoint_count: int
+
+
+class SfmDiagnostics(BaseModel):
+    """Written to `sfm/diagnostics.json` on every sparse-SfM attempt,
+    success or failure -- docs/ARCHITECTURE.md Section 4 (M2): "Diagnostics
+    JSON written even on failure." `attempt` is 1 for the initial pass and
+    2 for the Section 3.1 retry (lowered SIFT peak_threshold).
+    """
+
+    num_images_total: int
+    num_images_registered: int
+    registration_rate: float
+    attempt: int = 1
+    mean_reprojection_error_px: float | None = None
+    mean_track_length: float | None = None
+    median_triangulation_angle_deg: float | None = None
+    low_keypoint_images: list[LowKeypointImage] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DenseResult(BaseModel):
     """Dense point cloud summary. Populated starting at M3."""
 
