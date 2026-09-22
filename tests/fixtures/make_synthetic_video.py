@@ -43,6 +43,14 @@ something real to reject:
     holding the phone still) -- the redundancy gate should collapse these
     down to ~1 kept frame
 
+Also fixed at M3: `_camera_pose`'s rotation matrix was a *reflection*
+(det=-1), not a proper rotation, from v1 onward -- see the comment at its
+`down = cross(forward, right)` line for the full story. It never affected
+M1/M2 (COLMAP only needs the rendered frames to be *self*-consistent, not
+match any particular "intended" camera path) but would have silently
+broken M3's ray-traced ground-truth depth, which needs the actual camera
+model to be geometrically correct.
+
 Regenerate with: `uv run python tests/fixtures/make_synthetic_video.py`
 """
 
@@ -165,10 +173,27 @@ def _camera_pose(azimuth_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray
     forward /= np.linalg.norm(forward)
     right = np.cross(forward, world_up)
     right /= np.linalg.norm(right)
-    cam_up = np.cross(forward, right)
+    # For a proper (det=+1) right-handed (right, down, forward) triple,
+    # `down` must be `cross(forward, right)` -- by the BAC-CAB identity
+    # `right x cross(forward, right) = forward*(right.right) -
+    # right*(right.forward) = forward` exactly (right and forward are
+    # orthonormal), i.e. right x down = forward, the defining property of
+    # a right-handed system. An earlier version of this function negated
+    # this vector (thinking of it as "-cam_up"), which silently flipped
+    # the handedness into a *reflection* (det=-1) -- cv2.Rodrigues still
+    # accepts it and returns *some* rvec, but that rvec does not
+    # round-trip back to the same matrix, since Rodrigues' formula can
+    # only ever represent a proper rotation. Every frame this fixture
+    # ever rendered was still self-consistent (cv2.projectPoints uses
+    # Rodrigues(rvec) internally too, so encoding and rendering agreed
+    # with *each other*), which is why M1's gating logic and M2's SfM
+    # registration both worked fine regardless -- but it breaks
+    # render_true_depth below, which needs the actual camera model to be
+    # geometrically correct, not just self-consistent.
+    down = np.cross(forward, right)
 
-    # OpenCV camera axes: row0=right, row1=down(-up), row2=forward.
-    rotation = np.stack([right, -cam_up, forward], axis=0)
+    # OpenCV camera axes: row0=right, row1=down, row2=forward.
+    rotation = np.stack([right, down, forward], axis=0)
     tvec = -rotation @ eye
     rvec, _ = cv2.Rodrigues(rotation)
     return rvec.reshape(3), tvec.reshape(3), eye
@@ -208,6 +233,69 @@ def _render_frame(faces, rvec, tvec, cam_center, camera_matrix) -> np.ndarray:
         image[mask > 0] = warped[mask > 0]
 
     return image
+
+
+def render_true_depth(faces, rvec, tvec, cam_center, camera_matrix) -> np.ndarray:
+    """Exact camera-space depth (millimeters) for the frame `_render_frame`
+    would produce from the same faces/pose -- ray-plane intersection
+    against each visible face's actual 3D quad, using the same
+    visibility test and farthest-first compositing order as
+    `_render_frame`, so the two stay pixel-consistent.
+
+    Returns an (IMAGE_SIZE, IMAGE_SIZE) float32 array; 0.0 where no face
+    is visible (background). This is the ground truth Phase 2b's
+    depth-alignment and TSDF-integration code is tested against, standing
+    in for a real monocular depth model: this project's sandbox cannot
+    download Depth-Anything-V2's weights (huggingface.co is
+    network-policy-blocked, confirmed directly -- see CLAUDE.md), so
+    end-to-end dense-reconstruction tests use this exact, known-correct
+    depth instead of running the real model.
+    """
+    rotation, _ = cv2.Rodrigues(rvec)
+    k_inv = np.linalg.inv(camera_matrix)
+
+    ys, xs = np.mgrid[0:IMAGE_SIZE, 0:IMAGE_SIZE]
+    pixels_h = np.stack([xs.ravel(), ys.ravel(), np.ones(xs.size)], axis=0).astype(np.float64)
+    dirs_cam = k_inv @ pixels_h  # (3, N): each column is (X, Y, 1) in camera space
+    dirs_world = (rotation.T @ dirs_cam).T  # (N, 3)
+
+    depth = np.zeros(IMAGE_SIZE * IMAGE_SIZE, dtype=np.float64)
+
+    visible = []
+    for normal, corners, _texture in faces:
+        face_center = corners.mean(axis=0)
+        view_dir = face_center - cam_center
+        view_dir = view_dir / np.linalg.norm(view_dir)
+        if np.dot(normal, -view_dir) > 0.05:
+            face_depth = float(np.linalg.norm(face_center - cam_center))
+            visible.append((face_depth, normal, corners))
+    # Farthest first: nearer faces overwrite in the loop below, matching
+    # _render_frame's painter's-algorithm compositing.
+    visible.sort(key=lambda item: -item[0])
+
+    for _, normal, corners in visible:
+        center = corners.mean(axis=0)
+        # Recover the u/v axes used to build `corners` from _CORNER_UV's
+        # winding (see _build_faces): corners[1]-corners[0] = 2*u_axis*_HALF,
+        # corners[3]-corners[0] = 2*v_axis*_HALF.
+        u_axis = (corners[1] - corners[0]) / (2 * _HALF)
+        v_axis = (corners[3] - corners[0]) / (2 * _HALF)
+
+        denom = dirs_world @ normal  # (N,)
+        numerator = np.dot(corners[0] - cam_center, normal)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s = numerator / denom
+        valid = (np.abs(denom) > 1e-9) & (s > 0)
+
+        hit_points = cam_center[None, :] + s[:, None] * dirs_world  # (N, 3)
+        rel = hit_points - center[None, :]
+        u_coord = (rel @ u_axis) / _HALF
+        v_coord = (rel @ v_axis) / _HALF
+        in_quad = valid & (np.abs(u_coord) <= 1.0) & (np.abs(v_coord) <= 1.0)
+
+        depth[in_quad] = s[in_quad]
+
+    return depth.reshape(IMAGE_SIZE, IMAGE_SIZE).astype(np.float32)
 
 
 def generate() -> None:

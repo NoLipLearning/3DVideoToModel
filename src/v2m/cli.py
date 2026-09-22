@@ -25,6 +25,7 @@ from v2m.config import list_presets, load_config
 from v2m.errors import V2MError
 from v2m.logging_setup import setup_logging
 from v2m.phase1_ingest.extract import run_extract
+from v2m.phase2_sfm.dense import densify
 from v2m.phase2_sfm.sfm import run_sparse_sfm
 from v2m.types import PhaseName
 
@@ -269,9 +270,46 @@ def sfm_cmd(
 
 
 @app.command()
-def dense(run_dir: str) -> None:
-    """Phase 2b: dense point cloud. (M3)"""
-    _not_implemented("dense", "M3")
+def dense(
+    run_dir: str,
+    preset: str = typer.Option("object", "--preset"),
+) -> None:
+    """Phase 2b: dense point cloud. Expects sfm/ already populated by `sfm`."""
+    output_dir = Path(run_dir)
+
+    cfg = load_config(preset)
+    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
+    if ctx.manifest.preset != preset:
+        console.print(
+            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
+            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
+        )
+    setup_logging(run_log_path=ctx.log_path)
+
+    ctx.start_phase(PhaseName.SFM_DENSE)
+    try:
+        result = densify(ctx.sfm_dir, ctx.dense_dir, cfg.dense)
+    except V2MError as exc:
+        ctx.fail_phase(PhaseName.SFM_DENSE, exc.message)
+        console.print(f"[red]Dense reconstruction failed:[/red] {exc.message}")
+        if exc.remedy:
+            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
+        raise typer.Exit(code=1) from exc
+
+    ctx.complete_phase(
+        PhaseName.SFM_DENSE,
+        artifacts={"dense_points": result.dense_points_path},
+    )
+
+    table = Table(title="Dense reconstruction summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Backend", result.backend)
+    table.add_row("Dense points", f"[green]{result.num_points:,}[/green]")
+    if result.alignment_rmse is not None:
+        table.add_row("Mean alignment RMSE (1/units)", f"{result.alignment_rmse:.6g}")
+    console.print(table)
+    console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
 @app.command()

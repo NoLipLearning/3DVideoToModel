@@ -61,14 +61,19 @@ def test_median_triangulation_angle_none_for_empty_reconstruction():
 def test_summarize_flags_low_registration_rate(sfm_fixture):
     reconstruction = _load_reconstruction(sfm_fixture)
     database_path = sfm_fixture["run_dir"] / "sfm" / "database.db"
-    # An artificially strict minimum makes an otherwise-healthy
-    # reconstruction "fail" the registration-rate check.
-    strict_config = SfmConfig(registration_rate_min=0.999)
+    # This fixture's real registration rate can legitimately be a clean
+    # 100% (nothing to set a "stricter than achieved" threshold against,
+    # since rates cap at 1.0) -- so rather than asserting against
+    # whatever it actually achieved, claim one more total image than
+    # actually got registered. That guarantees a computed rate < 1.0
+    # regardless of the real pipeline's own result, so
+    # registration_rate_min=1.0 reliably triggers the warning.
+    inflated_total = sfm_fixture["result"].num_images_registered + 1
     diag = diagnostics.summarize(
         database_path=database_path,
         reconstruction=reconstruction,
-        num_images_total=sfm_fixture["result"].num_images_total,
-        config=strict_config,
+        num_images_total=inflated_total,
+        config=SfmConfig(registration_rate_min=1.0),
     )
     assert any("registration_rate" in w for w in diag.warnings)
 

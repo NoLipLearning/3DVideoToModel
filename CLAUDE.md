@@ -102,13 +102,38 @@ src/v2m/
   It degrades to sequential-only matching with a logged warning; set
   `V2M_VOCAB_TREE_PATH` to enable it for real on a machine that can reach
   COLMAP's site.
+- **`open3d.pipelines.integration.ScalableTSDFVolume` is broken in this
+  project's dev sandbox** (open3d==0.20.0, Linux CPU wheel) —
+  `integrate()` succeeds silently but every extraction method returns
+  empty, confirmed three ways including Open3D's own tutorial parameters
+  verbatim. `dense/monodepth_tsdf.py`'s `_build_tsdf_volume()` uses
+  `UniformTSDFVolume` instead, adaptively sized from the reconstruction's
+  own bounding box. If you're on macOS (the actual target) and confirm
+  `ScalableTSDFVolume` works there, that one function is the only call
+  site that would need to change back.
+- **COLMAP's own reconstruction scale is arbitrary, not metric** —
+  monocular SfM normalizes the first registered pair's baseline to an
+  unknown length; true scale isn't established until Phase 4's
+  `scale.py`. Don't apply `DenseConfig`'s `_m`-suffixed fields (or any
+  future Phase 2b/3 "physical size" default) as literal metres against a
+  raw COLMAP reconstruction — see `_build_tsdf_volume()`'s docstring for
+  the ratio-based pattern that stays correct regardless of what scale
+  COLMAP actually produced.
+- **`huggingface.co` is network-policy-blocked** in this sandbox
+  (confirmed directly) — `dense/monodepth_tsdf.py`'s
+  `TransformersDepthEstimator` cannot download Depth-Anything-V2's
+  weights here, so it is untested end-to-end. Tests inject a
+  `DepthEstimator` test double built from known fixture geometry instead
+  (`tests/unit/test_monodepth_tsdf.py`'s `GeometricDepthEstimator`).
+  Verify the real model on a machine that can reach huggingface.co
+  before trusting it blindly.
 
 ## Milestone status
 
 - [x] M0 — scaffold, config, capability probe, `v2m doctor`
 - [x] M1 — Phase 1: intelligent ingest
 - [x] M2 — Phase 2a: sparse SfM
-- [ ] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
+- [x] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
 - [ ] M4 — Phase 3: raw mesh (Poisson)
 - [ ] M5 — Phase 4: print-ready post-processing (the critical milestone)
 - [ ] M6 — end-to-end `v2m run` + `--resume`

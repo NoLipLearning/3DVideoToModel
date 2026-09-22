@@ -1,0 +1,434 @@
+"""Default dense backend on Apple Silicon: monocular depth + TSDF fusion.
+
+docs/ARCHITECTURE.md Section 2 ("Default dense strategy -- monodepth_tsdf"):
+  1. COLMAP gives per-image pose + intrinsics + sparse 3D points.
+  2. A monocular depth model gives *relative* inverse depth (disparity)
+     per frame -- dense and smooth even on blank walls.
+  3. Project that frame's visible sparse points into the image (here:
+     use the 2D-3D correspondences COLMAP already established, which are
+     exact by construction, not a re-derived approximation); fit a
+     robust affine `a*disparity + b ~= 1/z_sfm` to lift disparity to
+     metric inverse depth.
+  4. Integrate the aligned depth maps into an
+     `open3d.pipelines.integration.UniformTSDFVolume`, sized from the
+     sparse reconstruction's own bounding box, using the known poses.
+     (docs/ARCHITECTURE.md Section 2 specifies the auto-expanding
+     `ScalableTSDFVolume` instead -- see `_build_tsdf_volume()` below for
+     why this project switched to a `UniformTSDFVolume`.)
+  5. Extract the point cloud.
+
+The depth-inference step is behind the `DepthEstimator` protocol so it
+can be swapped out in tests: this project's sandbox cannot download
+Depth-Anything-V2's weights (huggingface.co is network-policy-blocked,
+confirmed directly -- see CLAUDE.md), so integration tests inject a
+geometric stand-in built from known fixture geometry
+(`tests/fixtures/make_synthetic_video.py::render_true_depth`) instead of
+`TransformersDepthEstimator`. `TransformersDepthEstimator` itself follows
+the standard HF depth-estimation pattern but has not been run end-to-end
+in this sandbox for the same reason -- verify it on a machine that can
+reach huggingface.co before trusting it blindly.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+from pathlib import Path
+from typing import Protocol
+
+import cv2
+import numpy as np
+import open3d as o3d
+import pycolmap
+
+from v2m.config import DenseConfig
+from v2m.errors import SfMError
+from v2m.phase2_sfm.dense import depth_alignment
+from v2m.types import DenseResult
+
+logger = logging.getLogger("v2m.phase2_sfm.dense.monodepth_tsdf")
+
+# How far past the farthest *reliable* (inlier) sparse-point depth in an
+# image to trust the aligned depth map before treating it as background/
+# extrapolation noise. Not itself specified numerically in the
+# architecture doc (only "Huber/RANSAC" for the fit itself) -- documented
+# here rather than silently invented elsewhere.
+_DEPTH_TRUNC_SAFETY_FACTOR = 3.0
+_INLIER_THRESHOLD_FRACTION = 0.1  # of the correspondence set's inverse-depth spread
+
+
+class DepthEstimator(Protocol):
+    def predict_disparity(self, image_bgr: np.ndarray, image_name: str | None = None) -> np.ndarray:
+        """Relative inverse depth (higher = closer): an HxW float32 array
+        matching `image_bgr`'s height and width.
+
+        `image_name` is an optional hint a real model ignores -- it
+        exists so a test double can look up which known pose/geometry an
+        input frame corresponds to (see
+        tests/unit/test_monodepth_tsdf.py's GeometricDepthEstimator),
+        without inventing content-based matching against COLMAP's
+        undistorted (and therefore not byte-identical) image copies.
+        """
+        ...
+
+
+class TransformersDepthEstimator:
+    """Depth Anything V2 via `transformers`. Lazy-loads the model on
+    first use, so constructing this object (or importing this module)
+    never requires torch/transformers to actually download or load
+    anything until a real prediction is requested.
+    """
+
+    def __init__(self, model_name: str, device: str | None = None) -> None:
+        self._model_name = model_name
+        self._requested_device = device
+        self._model = None
+        self._processor = None
+        self._device = "cpu"
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        if self._requested_device:
+            self._device = self._requested_device
+        elif torch.backends.mps.is_available():
+            self._device = "mps"
+        elif torch.cuda.is_available():
+            self._device = "cuda"
+        else:
+            self._device = "cpu"
+
+        try:
+            self._processor = AutoImageProcessor.from_pretrained(self._model_name)
+            self._model = AutoModelForDepthEstimation.from_pretrained(self._model_name)
+        except OSError as exc:
+            # huggingface_hub raises a plain OSError for both "no network"
+            # and "no local cache" -- either way this is a remedy-worthy
+            # user-facing failure, not a bare traceback (CLAUDE.md: "Raise
+            # V2MError subclasses with a remedy=, not bare exceptions").
+            raise SfMError(
+                f"Could not load depth model '{self._model_name}': {exc}",
+                remedy="Check network access to huggingface.co (needed on first run to "
+                "download weights; cached afterward), or switch to dense.backend: "
+                "sparse_only for a lower-quality preview that needs no depth model.",
+            ) from exc
+        self._model.to(self._device)
+        self._model.eval()
+
+    def predict_disparity(self, image_bgr: np.ndarray, image_name: str | None = None) -> np.ndarray:
+        del image_name  # unused: a real model only ever sees pixels
+        self._ensure_loaded()
+        import torch
+        from PIL import Image as PILImage
+
+        pil_image = PILImage.fromarray(image_bgr[:, :, ::-1])  # BGR -> RGB
+        inputs = self._processor(images=pil_image, return_tensors="pt")
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+
+        predicted = outputs.predicted_depth  # (1, h', w') at the model's internal resolution
+        resized = torch.nn.functional.interpolate(
+            predicted.unsqueeze(1),
+            size=image_bgr.shape[:2],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+        return resized.detach().cpu().numpy().astype(np.float32)
+
+
+def _gather_correspondences(
+    image: pycolmap.Image,
+    reconstruction: pycolmap.Reconstruction,
+    rotation: np.ndarray,
+    translation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pixel coords and camera-space inverse depths for this image's
+    2D-3D correspondences. These are COLMAP's own established
+    correspondences -- exact by construction, not a re-projection
+    approximation. `rotation`/`translation` are this image's
+    `cam_from_world()`, passed in so the caller (which also needs them
+    for TSDF integration) only computes it once.
+
+    Returns (pixel_x, pixel_y, inverse_depths) as parallel float arrays.
+    """
+    pixel_x: list[float] = []
+    pixel_y: list[float] = []
+    inverse_depths: list[float] = []
+
+    for point2d in image.points2D:
+        if not point2d.has_point3D():
+            continue
+        point3d = reconstruction.points3D[point2d.point3D_id]
+        z_cam = (rotation @ point3d.xyz + translation)[2]
+        if z_cam <= 1e-6:
+            continue
+        x_val, y_val = point2d.xy
+        pixel_x.append(float(x_val))
+        pixel_y.append(float(y_val))
+        inverse_depths.append(1.0 / z_cam)
+
+    return np.array(pixel_x), np.array(pixel_y), np.array(inverse_depths)
+
+
+def _sample_disparity(
+    disparity: np.ndarray, pixel_x: np.ndarray, pixel_y: np.ndarray
+) -> np.ndarray:
+    """Nearest-neighbor sample of `disparity` at each (x, y) -- COLMAP's
+    keypoint coordinates are sub-pixel, but the depth model's disparity
+    map is already a fairly smooth field, so nearest-neighbor sampling is
+    an acceptable, simple choice here (bilinear would be a marginal
+    refinement, not a correctness fix)."""
+    height, width = disparity.shape
+    xi = np.clip(np.round(pixel_x).astype(int), 0, width - 1)
+    yi = np.clip(np.round(pixel_y).astype(int), 0, height - 1)
+    return disparity[yi, xi]
+
+
+_MIN_TSDF_RESOLUTION = 32
+_MAX_TSDF_RESOLUTION = (
+    400  # resolution**3 voxels allocated upfront; caps memory (~400**3 * ~11B =~ 700MB)
+)
+_BBOX_TRIM_PERCENTILE = 0.02  # trim the outer 2% of points on each side before sizing the volume
+_BBOX_SAFETY_MARGIN = 1.3
+
+
+def _build_tsdf_volume(
+    reconstruction: pycolmap.Reconstruction, config: DenseConfig
+) -> o3d.pipelines.integration.UniformTSDFVolume:
+    """A `UniformTSDFVolume` sized from the reconstruction's own sparse
+    point-cloud extent, at `config.tsdf_voxel_size_m` resolution.
+
+    docs/ARCHITECTURE.md Section 2 specifies `ScalableTSDFVolume`
+    (auto-expanding, no size to compute up front). This project's
+    installed open3d==0.20.0 CPU build has a confirmed-broken
+    `ScalableTSDFVolume.integrate()` -- verified three independent ways,
+    including Open3D's own official RGBD-integration tutorial parameters
+    verbatim: `integrate()` runs without error, but
+    `extract_point_cloud()`, `extract_voxel_point_cloud()`, and
+    `extract_triangle_mesh()` all consistently return empty results, on
+    both this project's data and a trivial synthetic flat-plane case.
+    `UniformTSDFVolume` with otherwise-identical inputs works correctly.
+    This is very possibly a Linux-CPU-wheel-specific issue rather than a
+    real bug in Open3D generally -- if you're on macOS (this project's
+    actual target) and can confirm `ScalableTSDFVolume` works there,
+    switching back gets the better behavior on a very large/unbounded
+    "scene" capture that might not fit comfortably in a fixed-size
+    volume; this function's call site is the only place that would need
+    to change.
+
+    `config.tsdf_voxel_size_m`/`tsdf_sdf_trunc_m` are named (and
+    documented in docs/ARCHITECTURE.md Section 3.2) as literal metres,
+    but at this point in the pipeline that unit doesn't exist yet:
+    monocular SfM is scale-ambiguous, and COLMAP normalizes the first
+    registered image pair's baseline to an arbitrary length, not a
+    real-world one -- true metric scale isn't established until Phase 4's
+    `scale.py` (Section 3.4), which rescales the *final mesh*, long after
+    this volume is built and discarded. Treating `tsdf_sdf_trunc_m` as an
+    absolute value here would size the truncation band wrong by whatever
+    unknown factor COLMAP's unit differs from a real metre -- for a
+    tightly-spaced capture that factor can be tiny, making the band
+    thinner than a single voxel. So only the *ratio* between the two
+    config values (default 0.02/0.004 = 5 voxels of truncation) is
+    trusted as meaningful; it's applied to `voxel_size_actual`, the
+    per-voxel size this reconstruction's own extent actually resolves to
+    after the resolution clamp above -- whatever scale that turns out to
+    be. `resolution` itself needs no equivalent correction: clamping it
+    to [`_MIN_TSDF_RESOLUTION`, `_MAX_TSDF_RESOLUTION`] already absorbs
+    an arbitrary length/voxel_size_m ratio without reference to real
+    units.
+    """
+    bbox = reconstruction.compute_bounding_box(_BBOX_TRIM_PERCENTILE, 1.0 - _BBOX_TRIM_PERCENTILE)
+    extent = np.asarray(bbox.max) - np.asarray(bbox.min)
+    center = (np.asarray(bbox.max) + np.asarray(bbox.min)) / 2.0
+
+    if not np.all(np.isfinite(extent)) or np.any(extent < 0):
+        # Degenerate/near-empty point cloud -- fall back to a modest
+        # default volume rather than raising here; densify() already
+        # requires a real reconstruction to reach this point, so this is
+        # a last-resort safety net, not the expected path. There's no
+        # reconstruction-derived scale to anchor to at all in this case,
+        # so the config value is used as a literal (best-effort) length.
+        extent = np.full(3, config.tsdf_voxel_size_m * _MIN_TSDF_RESOLUTION)
+        center = np.zeros(3)
+
+    half_diagonal = float(np.linalg.norm(extent)) / 2.0
+    length = max(
+        2.0 * half_diagonal * _BBOX_SAFETY_MARGIN, config.tsdf_voxel_size_m * _MIN_TSDF_RESOLUTION
+    )
+    resolution = int(
+        np.clip(
+            round(length / config.tsdf_voxel_size_m), _MIN_TSDF_RESOLUTION, _MAX_TSDF_RESOLUTION
+        )
+    )
+    origin = center - length / 2.0
+
+    voxel_size_actual = length / resolution
+    trunc_voxel_multiple = config.tsdf_sdf_trunc_m / config.tsdf_voxel_size_m
+    sdf_trunc = trunc_voxel_multiple * voxel_size_actual
+
+    return o3d.pipelines.integration.UniformTSDFVolume(
+        length=length,
+        resolution=resolution,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        origin=origin,
+    )
+
+
+def densify(
+    sfm_dir: Path,
+    output_dir: Path,
+    config: DenseConfig,
+    *,
+    depth_estimator: DepthEstimator | None = None,
+) -> DenseResult:
+    """Run Phase 2b end to end: sparse reconstruction -> dense point cloud.
+
+    Writes `<output_dir>/{depth/*.npy, dense.ply, alignment_report.json}`.
+    `depth_estimator` defaults to the real `TransformersDepthEstimator`;
+    tests inject a synthetic stand-in (see module docstring).
+    """
+    sparse_dir = sfm_dir / "sparse" / "final"
+    images_dir = sfm_dir / "undistorted" / "images"
+    if not sparse_dir.exists() or not images_dir.exists():
+        raise SfMError(
+            f"No completed sparse reconstruction found in {sfm_dir}.",
+            remedy="Run `v2m sfm` first to produce sparse/final/ and undistorted/images/.",
+        )
+
+    reconstruction = pycolmap.Reconstruction(sparse_dir)
+    if depth_estimator is None:
+        depth_estimator = TransformersDepthEstimator(config.depth_model)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    depth_dir = output_dir / "depth"
+    if depth_dir.exists():
+        shutil.rmtree(depth_dir)
+    depth_dir.mkdir(parents=True)
+
+    volume = _build_tsdf_volume(reconstruction, config)
+
+    per_image_reports: list[dict] = []
+    integrated_count = 0
+    all_rmses: list[float] = []
+
+    for image in reconstruction.images.values():
+        image_path = images_dir / image.name
+        color_bgr = cv2.imread(str(image_path)) if image_path.exists() else None
+        report: dict = {"name": image.name}
+
+        if color_bgr is None:
+            report["skipped"] = "image file not found"
+            per_image_reports.append(report)
+            continue
+
+        pose = image.cam_from_world()
+        rotation = pose.rotation.matrix()
+        translation = pose.translation
+
+        pixel_x, pixel_y, inverse_depths = _gather_correspondences(
+            image, reconstruction, rotation, translation
+        )
+        report["num_correspondences"] = len(inverse_depths)
+
+        if len(inverse_depths) < config.min_alignment_correspondences:
+            report["skipped"] = (
+                f"only {len(inverse_depths)} correspondences "
+                f"(need >= {config.min_alignment_correspondences})"
+            )
+            per_image_reports.append(report)
+            continue
+
+        disparity = depth_estimator.predict_disparity(color_bgr, image.name)
+        disparities_at_points = _sample_disparity(disparity, pixel_x, pixel_y)
+
+        depth_spread = float(np.ptp(inverse_depths)) or 1.0
+        inlier_threshold = _INLIER_THRESHOLD_FRACTION * depth_spread
+        a, b, inlier_mask = depth_alignment.fit_affine_ransac(
+            disparities_at_points, inverse_depths, inlier_threshold=inlier_threshold
+        )
+        fit_rmse = depth_alignment.rmse(
+            disparities_at_points[inlier_mask], inverse_depths[inlier_mask], a, b
+        )
+        report.update(
+            {
+                "num_inliers": int(inlier_mask.sum()),
+                "affine_a": a,
+                "affine_b": b,
+                "alignment_rmse_inv_m": fit_rmse,
+            }
+        )
+        all_rmses.append(fit_rmse)
+        per_image_reports.append(report)
+
+        metric_inverse_depth = a * disparity + b
+        with np.errstate(divide="ignore", invalid="ignore"):
+            metric_depth = np.where(metric_inverse_depth > 1e-6, 1.0 / metric_inverse_depth, 0.0)
+        metric_depth = metric_depth.astype(np.float32)
+
+        np.save(depth_dir / f"{Path(image.name).stem}.npy", metric_depth)
+
+        max_reliable_depth = float(np.max(1.0 / inverse_depths[inlier_mask]))
+        depth_trunc = _DEPTH_TRUNC_SAFETY_FACTOR * max_reliable_depth
+        metric_depth = np.where(metric_depth <= depth_trunc, metric_depth, 0.0)
+
+        color_rgb = np.ascontiguousarray(color_bgr[:, :, ::-1])
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            o3d.geometry.Image(color_rgb),
+            o3d.geometry.Image(metric_depth),
+            depth_scale=1.0,
+            depth_trunc=depth_trunc,
+            convert_rgb_to_intensity=False,
+        )
+
+        camera = image.camera
+        intrinsic = o3d.camera.PinholeCameraIntrinsic(
+            camera.width,
+            camera.height,
+            camera.focal_length_x,
+            camera.focal_length_y,
+            camera.principal_point_x,
+            camera.principal_point_y,
+        )
+        extrinsic = np.eye(4)
+        extrinsic[:3, :3] = rotation
+        extrinsic[:3, 3] = translation
+
+        volume.integrate(rgbd, intrinsic, extrinsic)
+        integrated_count += 1
+
+    (output_dir / "alignment_report.json").write_text(json.dumps(per_image_reports, indent=2))
+
+    if integrated_count == 0:
+        raise SfMError(
+            "No image had enough sparse correspondences to align a metric depth map "
+            f"(need >= {config.min_alignment_correspondences} per image).",
+            remedy="Check sfm/diagnostics.json -- the sparse reconstruction is likely too "
+            "weak for dense reconstruction. Re-shoot with more texture/parallax.",
+        )
+
+    cloud = volume.extract_point_cloud()
+    dense_ply_path = output_dir / "dense.ply"
+    o3d.io.write_point_cloud(str(dense_ply_path), cloud)
+
+    overall_rmse = float(np.mean(all_rmses)) if all_rmses else None
+    logger.info(
+        "Dense reconstruction: %d/%d images integrated, %d points, mean alignment RMSE %s.",
+        integrated_count,
+        len(reconstruction.images),
+        len(cloud.points),
+        f"{overall_rmse:.4f}" if overall_rmse is not None else "n/a",
+    )
+
+    return DenseResult(
+        backend="monodepth_tsdf",
+        num_points=len(cloud.points),
+        dense_points_path=str(dense_ply_path.relative_to(output_dir)),
+        alignment_rmse=overall_rmse,
+    )
