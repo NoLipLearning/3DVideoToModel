@@ -27,6 +27,7 @@ from v2m.logging_setup import setup_logging
 from v2m.phase1_ingest.extract import run_extract
 from v2m.phase2_sfm.dense import densify
 from v2m.phase2_sfm.sfm import run_sparse_sfm
+from v2m.phase3_mesh import build_mesh
 from v2m.types import PhaseName
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -313,9 +314,45 @@ def dense(
 
 
 @app.command()
-def mesh(run_dir: str) -> None:
-    """Phase 3: raw surface mesh. (M4)"""
-    _not_implemented("mesh", "M4")
+def mesh(
+    run_dir: str,
+    preset: str = typer.Option("object", "--preset"),
+) -> None:
+    """Phase 3: raw surface mesh. Expects dense/ already populated by `dense`."""
+    output_dir = Path(run_dir)
+
+    cfg = load_config(preset)
+    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
+    if ctx.manifest.preset != preset:
+        console.print(
+            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
+            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
+        )
+    setup_logging(run_log_path=ctx.log_path)
+
+    ctx.start_phase(PhaseName.MESH)
+    try:
+        result = build_mesh(ctx.dense_dir, ctx.sfm_dir, ctx.mesh_dir, cfg.dense, cfg.mesh)
+    except V2MError as exc:
+        ctx.fail_phase(PhaseName.MESH, exc.message)
+        console.print(f"[red]Meshing failed:[/red] {exc.message}")
+        if exc.remedy:
+            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
+        raise typer.Exit(code=1) from exc
+
+    ctx.complete_phase(PhaseName.MESH, artifacts={"mesh": result.mesh_path})
+
+    table = Table(title="Raw mesh summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Vertices", f"{result.num_vertices:,}")
+    table.add_row("Faces", f"{result.num_faces:,}")
+    table.add_row(
+        "Edge/vertex manifold",
+        "[green]yes[/green]" if result.is_manifold else "[yellow]no[/yellow]",
+    )
+    console.print(table)
+    console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
 @app.command()

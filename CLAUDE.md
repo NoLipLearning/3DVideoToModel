@@ -124,9 +124,17 @@ src/v2m/
   `TransformersDepthEstimator` cannot download Depth-Anything-V2's
   weights here, so it is untested end-to-end. Tests inject a
   `DepthEstimator` test double built from known fixture geometry instead
-  (`tests/unit/test_monodepth_tsdf.py`'s `GeometricDepthEstimator`).
-  Verify the real model on a machine that can reach huggingface.co
-  before trusting it blindly.
+  (`tests/conftest.py`'s session-scoped `dense_fixture` /
+  `GeometricDepthEstimator`). Verify the real model on a machine that can
+  reach huggingface.co before trusting it blindly.
+- **Neither dense backend's output carries a per-point "which camera saw
+  this" tag.** `phase3_mesh/normals.py`'s "orient toward the observing
+  camera" (Section 4 M4) is therefore each point's *nearest*
+  reconstructed camera center, not a literal per-point visibility
+  lookup — see its module docstring. Same posture as the
+  `min_component_volume_ratio` note in `cleanup.py`: a config/doc name
+  that's a slight simplification of what's actually measured, documented
+  at the point of implementation rather than silently reinterpreted.
 
 ## Milestone status
 
@@ -134,7 +142,7 @@ src/v2m/
 - [x] M1 — Phase 1: intelligent ingest
 - [x] M2 — Phase 2a: sparse SfM
 - [x] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
-- [ ] M4 — Phase 3: raw mesh (Poisson)
+- [x] M4 — Phase 3: raw mesh (Poisson)
 - [ ] M5 — Phase 4: print-ready post-processing (the critical milestone)
 - [ ] M6 — end-to-end `v2m run` + `--resume`
 - [ ] M7 — local web UI
