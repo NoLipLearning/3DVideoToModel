@@ -274,8 +274,8 @@ def _print_options(
             console.print(f'[red]--scale-points must look like "x,y,z;x,y,z":[/red] {exc}')
             raise typer.Exit(code=1) from exc
         two_point = (point_a, point_b, scale_distance_mm)
-    if (aruco_image is None) != (aruco_marker_mm is None):
-        console.print("[red]--aruco-image and --aruco-marker-mm go together.[/red]")
+    if aruco_image is not None and aruco_marker_mm is None:
+        console.print("[red]--aruco-image needs --aruco-marker-mm (the printed size).[/red]")
         raise typer.Exit(code=1)
     return pipeline.PrintOptions(
         scale_factor=scale_factor,
@@ -297,10 +297,15 @@ _SCALE_DISTANCE_OPT = typer.Option(
     None, "--scale-distance-mm", help="Real distance between the two --scale-points."
 )
 _ARUCO_IMAGE_OPT = typer.Option(
-    None, "--aruco-image", help="Frame (e.g. 000012.jpg) showing a printed ArUco marker."
+    None,
+    "--aruco-image",
+    help="Frame (e.g. 000012.jpg) to read the marker from. Default: the frame where it "
+    "appears largest.",
 )
 _ARUCO_MM_OPT = typer.Option(
-    None, "--aruco-marker-mm", help="Printed edge length of the ArUco marker."
+    None,
+    "--aruco-marker-mm",
+    help="Printed edge length of an ArUco marker (DICT_4X4_50) placed in the scene.",
 )
 _TARGET_SIZE_OPT = typer.Option(
     None, "--target-size", help="Longest-axis size in mm when no metric reference is given."
@@ -421,6 +426,11 @@ def run_cmd(
     run_dir: str | None = typer.Option(
         None, "--run-dir", help="Where to create a new run (default: runs/<timestamp>_<id>/)."
     ),
+    from_frames: str | None = typer.Option(
+        None,
+        "--from-frames",
+        help="Start from a folder of frames instead of a video (e.g. from `v2m capture`).",
+    ),
     rerun_from: PhaseName | None = _RERUN_FROM_OPT,
     overrides: list[str] = _SET_OPT,
     scale_factor: float | None = _SCALE_FACTOR_OPT,
@@ -459,15 +469,19 @@ def run_cmd(
                     f"--preset {preset} is ignored on --resume. Use --set to change settings."
                 )
         else:
-            if video is None:
-                console.print("[red]Give a video to start a run, or --resume <run_dir>.[/red]")
+            if (video is None) == (from_frames is None):
+                console.print(
+                    "[red]Give a video or --from-frames <folder> to start a run, or --resume "
+                    "<run_dir>.[/red]"
+                )
                 raise typer.Exit(code=1)
             if rerun_from is not None:
                 console.print("[red]--rerun-from only applies with --resume.[/red]")
                 raise typer.Exit(code=1)
             ctx, cfg = pipeline.start_run(
-                Path(video),
+                Path(video) if video else None,
                 preset or "object",
+                frames_dir=Path(from_frames) if from_frames else None,
                 overrides=override_dict,
                 run_dir=Path(run_dir) if run_dir else None,
                 print_options=options,
@@ -475,7 +489,11 @@ def run_cmd(
     except V2MError as exc:
         _print_error("Can't start", exc)
         raise typer.Exit(code=1) from exc
+    _execute_run(ctx, cfg, skip_preflight=skip_preflight)
 
+
+def _execute_run(ctx, cfg, *, skip_preflight: bool = False) -> None:
+    """Run the pipeline with live progress lines, then print the result."""
     setup_logging(run_log_path=ctx.log_path)
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]  (preset {ctx.manifest.preset})")
     try:
@@ -504,15 +522,75 @@ def run_cmd(
 
 
 @app.command()
-def serve(port: int = typer.Option(8000, "--port")) -> None:
-    """Local web UI for upload + progress + preview. (M7)"""
-    _not_implemented("serve", "M7")
+def serve(
+    port: int = typer.Option(8000, "--port"),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Interface to bind. The UI has no authentication -- only expose it beyond "
+        "localhost on a network you trust.",
+    ),
+    runs_dir: str = typer.Option(str(rc.RUNS_ROOT), "--runs-dir", help="Where runs are stored."),
+) -> None:
+    """Local web UI: upload a video, watch progress, preview and download the model."""
+    import uvicorn
+
+    from v2m.web.app import create_app
+
+    setup_logging()
+    console.print(f"v2m web UI on [bold]http://{host}:{port}[/bold]  (runs in {runs_dir})")
+    uvicorn.run(create_app(Path(runs_dir)), host=host, port=port, log_level="warning")
 
 
 @app.command()
-def capture(output: str = typer.Option(..., "--output", "-o")) -> None:
-    """Guided live capture session. (M8)"""
-    _not_implemented("capture", "M8")
+def capture(
+    output: str = typer.Option(..., "--output", "-o", help="Folder to write accepted frames to."),
+    camera: int = typer.Option(0, "--camera", help="Camera index (0 = default camera)."),
+    source: str | None = typer.Option(
+        None, "--source", help="A video file or stream URL to use instead of a camera."
+    ),
+    preset: str = typer.Option("object", "--preset", help="Sets the frame budget and resolution."),
+    no_preview: bool = typer.Option(
+        False, "--no-preview", help="No HUD window (headless machine, or replaying a file)."
+    ),
+    max_seconds: float | None = typer.Option(None, "--max-seconds", help="Stop after this long."),
+    then_run: bool = typer.Option(False, "--run", help="Reconstruct as soon as capture ends."),
+) -> None:
+    """Guided live capture: a HUD that keeps only usable frames. Space pauses, q finishes."""
+    from v2m.capture.live import run_capture
+
+    setup_logging()
+    try:
+        cfg = load_config(preset)
+        summary = run_capture(
+            source if source is not None else camera,
+            Path(output),
+            cfg.ingest,
+            show=not no_preview,
+            max_seconds=max_seconds,
+        )
+    except V2MError as exc:
+        _print_error("Capture failed", exc)
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"Kept [green]{summary['accepted']}[/green] of {summary['frames_seen']} frames "
+        f"(budget {summary['budget']}) in [bold]{output}[/bold]"
+    )
+    if summary["accepted"] < 20:
+        console.print(
+            "[yellow]That's few views for a reconstruction -- walk all the way around the "
+            "subject, slowly, and capture again if the result has holes.[/yellow]"
+        )
+    if not then_run:
+        console.print(f"Next: [bold]v2m run --from-frames {output} --preset {preset}[/bold]")
+        return
+    try:
+        ctx, run_cfg = pipeline.start_run(None, preset, frames_dir=Path(output))
+    except V2MError as exc:
+        _print_error("Can't start", exc)
+        raise typer.Exit(code=1) from exc
+    _execute_run(ctx, run_cfg)
 
 
 def main() -> None:

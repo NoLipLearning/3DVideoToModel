@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>v2m — video to printable model</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 10v12L16 29 4 22V10z' fill='%232f5fd0'/%3E%3Cpath d='M16 3v26M4 10l12 7 12-7' stroke='%23fff' stroke-width='1.5' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <!-- Google's <model-viewer>, from Google's CDN: no build step (docs/ARCHITECTURE.md M7). -->
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>v2m</h1>
+    <p class="tagline">Video in, printable 3D model out.</p>
+  </header>
+
+  <section class="card" id="new-run">
+    <h2>New model</h2>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="video/*,.mov,.mp4,.m4v,.mkv,.avi,.webm,.hevc" hidden>
+      <span class="drop-main" id="drop-label">Drop a video here, or click to choose</span>
+      <span class="drop-hint">Walk slowly all the way around the subject. Keep it in frame.</span>
+    </label>
+
+    <fieldset class="presets" id="presets">
+      <legend>What did you film?</legend>
+      <label><input type="radio" name="preset" value="object" checked>
+        <span><b>Object</b><small>One subject, flat base, closed bottom</small></span></label>
+      <label><input type="radio" name="preset" value="scene">
+        <span><b>Scene</b><small>Street, room or facade, on a printable slab</small></span></label>
+      <label><input type="radio" name="preset" value="fast">
+        <span><b>Quick preview</b><small>Low-res check that the capture works</small></span></label>
+    </fieldset>
+
+    <details class="advanced">
+      <summary>Real-world size</summary>
+      <p class="hint">Without a reference, the model is scaled to fit your printer. For true
+        dimensions, lay a printed ArUco marker (DICT_4X4_50) next to the subject while filming.</p>
+      <div class="fields">
+        <label>Marker edge length (mm)<input type="number" id="aruco" min="1" step="0.1" placeholder="e.g. 100"></label>
+        <label>Otherwise, fit longest side to (mm)<input type="number" id="target" min="1" step="1" placeholder="150"></label>
+      </div>
+    </details>
+
+    <div class="actions">
+      <button id="start" disabled>Build model</button>
+      <div class="upload-progress" id="upload-progress" hidden><div></div></div>
+    </div>
+    <p class="error" id="form-error" hidden></p>
+  </section>
+
+  <section class="card" id="job" hidden>
+    <div class="job-head">
+      <h2 id="job-title">Run</h2>
+      <span class="badge" id="job-badge"></span>
+    </div>
+    <p class="hint" id="job-queue" hidden></p>
+    <ol class="phases" id="phases"></ol>
+    <div class="failure" id="failure" hidden>
+      <p><b>Something went wrong:</b> <span id="failure-message"></span></p>
+      <p class="remedy" id="failure-remedy"></p>
+      <button id="resume" class="secondary">Resume from where it stopped</button>
+    </div>
+    <details class="log" id="log-wrap">
+      <summary>Log</summary>
+      <pre id="log"></pre>
+    </details>
+  </section>
+
+  <section class="card" id="result" hidden>
+    <h2>Your model</h2>
+    <div class="result">
+      <model-viewer id="viewer" camera-controls auto-rotate shadow-intensity="1"
+                    exposure="1.1" alt="3D preview of the reconstructed model"></model-viewer>
+      <div class="result-side">
+        <dl id="stats"></dl>
+        <div class="downloads">
+          <a class="button" id="dl-stl" download>Download STL</a>
+          <a class="button secondary" id="dl-obj" download>OBJ</a>
+          <a class="button secondary" id="dl-glb" download>GLB</a>
+        </div>
+        <a id="report-link" target="_blank" rel="noopener">Full report ↗</a>
+      </div>
+    </div>
+    <ul class="warnings" id="warnings"></ul>
+  </section>
+
+  <section class="card" id="history">
+    <h2>Previous runs</h2>
+    <p class="hint" id="history-empty">Nothing yet.</p>
+    <ul class="runs" id="runs"></ul>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

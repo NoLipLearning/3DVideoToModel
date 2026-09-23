@@ -36,6 +36,7 @@ from v2m import preflight
 from v2m.config import PipelineConfig, config_from_snapshot, load_config
 from v2m.errors import ConfigError, IngestError, ResumeError, V2MError
 from v2m.phase1_ingest.extract import run_extract
+from v2m.phase1_ingest.from_frames import import_frames
 from v2m.phase2_sfm.dense import densify
 from v2m.phase2_sfm.dense.monodepth_tsdf import DepthEstimator
 from v2m.phase2_sfm.sfm import run_sparse_sfm
@@ -157,23 +158,36 @@ def _earliest_affected_phase(changed_keys: list[str]) -> PhaseName | None:
 
 
 def start_run(
-    video: Path,
+    video: Path | None,
     preset: str,
     *,
+    frames_dir: Path | None = None,
     overrides: dict[str, Any] | None = None,
     run_dir: Path | None = None,
     print_options: PrintOptions | None = None,
 ) -> tuple[RunContext, PipelineConfig]:
-    """Create a fresh run for `video`. `run_dir=None` invents
-    `runs/<timestamp>_<id>/`."""
-    if not video.exists():
+    """Create a fresh run from `video`, or from a folder of frames
+    (`frames_dir`, e.g. a `v2m capture` folder) -- exactly one of the two.
+    `run_dir=None` invents `runs/<timestamp>_<id>/`."""
+    if (video is None) == (frames_dir is None):
+        raise IngestError(
+            "A run needs exactly one source: a video or a folder of frames.",
+            remedy="Pass a video, or --from-frames <folder>, but not both.",
+        )
+    if video is not None and not video.exists():
         raise IngestError(
             f"Video not found: {video}", remedy="Check the path, or drag the file in again."
         )
+    if frames_dir is not None and not frames_dir.is_dir():
+        raise IngestError(
+            f"Frames folder not found: {frames_dir}",
+            remedy="Point --from-frames at the folder `v2m capture` wrote.",
+        )
     cfg = load_config(preset, overrides)
     snapshot = cfg.model_dump(mode="json")
+    source_video = str(video) if video is not None else None
     if run_dir is None:
-        ctx = RunContext.create(preset=preset, config_snapshot=snapshot, source_video=str(video))
+        ctx = RunContext.create(preset=preset, config_snapshot=snapshot, source_video=source_video)
     else:
         if (run_dir / "manifest.json").exists():
             raise ResumeError(
@@ -181,11 +195,13 @@ def start_run(
                 remedy=f"Use `v2m run --resume {run_dir}` to continue it, or pick a new --run-dir.",
             )
         ctx = RunContext.at(
-            run_dir, preset=preset, config_snapshot=snapshot, source_video=str(video)
+            run_dir, preset=preset, config_snapshot=snapshot, source_video=source_video
         )
+    if frames_dir is not None:
+        ctx.manifest.source_frames = str(frames_dir.resolve())
     if print_options is not None:
         ctx.manifest.print_options = print_options.to_json()
-        ctx.save()
+    ctx.save()
     return ctx, cfg
 
 
@@ -276,8 +292,10 @@ def _execute(
     depth_estimator: DepthEstimator | None,
 ) -> tuple[BaseModel, dict[str, str]]:
     if phase == PhaseName.INGEST:
-        video = _source_video(ctx)
-        summary = run_extract(video, ctx.run_dir, cfg.ingest)
+        if ctx.manifest.source_frames is not None:
+            summary = import_frames(_source_frames(ctx), ctx.run_dir, cfg.ingest)
+        else:
+            summary = run_extract(_source_video(ctx), ctx.run_dir, cfg.ingest)
         return summary, {"frames_json": summary.frames_json_path}
     if phase == PhaseName.SFM_SPARSE:
         result = run_sparse_sfm(ctx.frames_dir, ctx.sfm_dir, cfg.sfm)
@@ -309,6 +327,16 @@ def _execute(
             "print_report": "print_report.json",
         }
     raise ValueError(f"unknown phase {phase}")
+
+
+def _source_frames(ctx: RunContext) -> Path:
+    frames = Path(ctx.manifest.source_frames)
+    if not frames.is_dir():
+        raise IngestError(
+            f"The run's frames folder {frames} no longer exists.",
+            remedy="Restore the folder, or start a fresh run.",
+        )
+    return frames
 
 
 def _source_video(ctx: RunContext) -> Path:
@@ -352,7 +380,7 @@ def run_phase(
     if on_progress:
         on_progress(phase, PhaseStatus.RUNNING, None)
     try:
-        if phase == PhaseName.INGEST:
+        if phase == PhaseName.INGEST and ctx.manifest.source_frames is None:
             # The video's fingerprint, so a later --resume can tell whether
             # it is being pointed at the same clip.
             ctx.manifest.phases[phase].input_hash = hash_file(_source_video(ctx))

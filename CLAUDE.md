@@ -62,8 +62,8 @@ src/v2m/
   phase2_sfm/       Sparse SfM (COLMAP) + dense reconstruction (backends/ + dense/)
   phase3_mesh/      Point cloud -> raw surface mesh (Poisson)
   phase4_print/     Surface -> watertight, scaled, printable solid (THE hard part -- see docs/ARCHITECTURE.md Section 3.3)
-  capture/          Guided live-capture HUD (M8) -- feeds phase1, not a SLAM system
-  web/              FastAPI local UI (M7)
+  capture/          Guided live-capture HUD (M8) -- feeds phase1 via `run --from-frames`, not a SLAM system
+  web/              FastAPI local UI (M7): app.py routes, jobs.py single-worker queue, static/ (no build step)
   report/           Per-run self-contained report.html (html.py) + software-rendered model preview (preview.py)
 ```
 
@@ -105,6 +105,12 @@ src/v2m/
   points are identical in both). The two only coincide when a camera's
   estimated distortion is ~0, which is how this went unnoticed through
   M3.
+- **`manifest.json` is written atomically** (`RunContext.save()`: temp
+  file + `os.replace`). The web UI reads manifests while the worker
+  writes them; never go back to a plain `write_text` there.
+- **STL/OBJ are +Z up in millimetres; the GLB is +Y up in metres**
+  (glTF's convention, `export._to_gltf_convention`). Slicers want the
+  former, `<model-viewer>` the latter.
 - **`trimesh` `VoxelGrid.marching_cubes` returns voxel-index
   coordinates.** Always `apply_transform(voxels.transform)` afterwards.
 - **Compare reconstructed dimensions rotation-invariantly** (volume,
@@ -167,8 +173,8 @@ src/v2m/
 - [x] M4 — Phase 3: raw mesh (Poisson)
 - [x] M5 — Phase 4: print-ready post-processing (the critical milestone)
 - [x] M6 — end-to-end `v2m run` + `--resume`
-- [ ] M7 — local web UI
-- [ ] M8 — guided live capture
+- [x] M7 — local web UI
+- [x] M8 — guided live capture (verified with a video standing in for the camera; real webcam untested here)
 - [ ] M9 — optional quality backends (OpenMVS, hloc/ALIKED, tiling)
 
 Update the checkbox when a milestone's verification step (in

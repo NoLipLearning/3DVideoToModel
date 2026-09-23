@@ -74,6 +74,9 @@ class RunManifest(BaseModel):
     run_id: str
     created_at: datetime
     source_video: str | None = None
+    # Set instead of source_video for a run built from a folder of frames
+    # (`v2m run --from-frames`, e.g. a `v2m capture` folder). Added at M8.
+    source_frames: str | None = None
     preset: str
     config: dict[str, Any]
     phases: dict[PhaseName, PhaseRecord] = Field(

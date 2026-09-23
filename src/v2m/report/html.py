@@ -124,7 +124,7 @@ def capture_advice(ctx: RunContext) -> list[str]:
         advice.append(
             "The model's size is not real-world: it was scaled to fit the printer. For true "
             "dimensions, lay a printed 100 mm ArUco marker (DICT_4X4_50) in the scene and pass "
-            "--aruco-image / --aruco-marker-mm, or give --scale-factor or --scale-points."
+            "--aruco-marker-mm 100, or give --scale-factor or --scale-points."
         )
     if print_report.get("repair_rung_used") == 6:
         advice.append(

@@ -11,6 +11,8 @@ mesh's own (COLMAP-arbitrary-unit) coordinates by it to get millimetres.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import trimesh
@@ -69,6 +71,32 @@ def resolve_scale_aruco(
     if colmap_distance_mm <= 0:
         return None
     return metric_distance_mm / colmap_distance_mm
+
+
+def find_aruco_image(images_dir: Path, aruco_dict: int = cv2.aruco.DICT_4X4_50) -> str | None:
+    """The image in `images_dir` where an ArUco marker appears largest
+    (longest detected perimeter, in pixels), or None if none shows one.
+
+    This is what makes the ArUco path "fully automatic" (Section 3.4):
+    the user only states the printed marker's size, never which frame it
+    is in -- they can't know frame numbers before Phase 1 has run. The
+    largest view is also the most accurate one for `solvePnP`: corner
+    localisation error is roughly constant in pixels, so it matters
+    least, relatively, when the marker is big.
+    """
+    detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(aruco_dict))
+    best_name, best_perimeter = None, 0.0
+    for path in sorted(images_dir.glob("*.jpg")):
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            continue
+        corners, ids, _ = detector.detectMarkers(image)
+        if ids is None:
+            continue
+        perimeter = max(cv2.arcLength(c.reshape(-1, 1, 2), True) for c in corners)
+        if perimeter > best_perimeter:
+            best_name, best_perimeter = path.name, perimeter
+    return best_name
 
 
 def resolve_scale_two_point(

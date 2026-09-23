@@ -132,6 +132,14 @@ def run_print_prep(
         factor = scale.resolve_scale_two_point(point_a, point_b, real_distance_mm)
         scale_method = "two_point"
 
+    if aruco_marker_mm is not None and aruco_image_name is None:
+        aruco_image_name = scale.find_aruco_image(sfm_dir / "undistorted" / "images")
+        if aruco_image_name is None:
+            warnings.append(
+                "ArUco: --aruco-marker-mm was given but no DICT_4X4_50 marker was found in any "
+                "frame; skipping."
+            )
+
     if aruco_image_name is not None and aruco_marker_mm is not None:
         image_path = sfm_dir / "undistorted" / "images" / aruco_image_name
         image_bgr = cv2.imread(str(image_path))

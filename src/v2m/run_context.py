@@ -11,7 +11,9 @@ manifest".
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -157,7 +159,14 @@ class RunContext:
     # -- manifest lifecycle -----------------------------------------------
 
     def save(self) -> None:
-        self.manifest_path.write_text(self.manifest.model_dump_json(indent=2))
+        """Atomic: write a temp file, then rename it over manifest.json.
+        A plain `write_text` truncates first, so a reader (the web UI polls
+        manifests while the worker writes them) could see an empty file,
+        and a kill mid-write would leave a corrupt manifest that makes
+        --resume impossible -- the one thing the manifest exists for."""
+        tmp = self.manifest_path.with_name(f".manifest.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(self.manifest.model_dump_json(indent=2))
+        os.replace(tmp, self.manifest_path)
 
     def start_phase(self, phase: PhaseName, *, input_hash: str | None = None) -> None:
         record = self.manifest.phases[phase]

@@ -66,3 +66,27 @@ def test_at_creates_then_attaches_idempotently(tmp_path):
     assert ctx2.manifest.run_id == ctx1.manifest.run_id
     assert ctx2.manifest.phases[PhaseName.INGEST].status == PhaseStatus.COMPLETE
     assert ctx2.manifest.phases[PhaseName.INGEST].artifacts["frames_json"] == "frames/frames.json"
+
+
+def test_save_is_atomic_so_concurrent_readers_never_see_a_partial_manifest(isolated_runs_root):
+    import threading
+
+    ctx = rc.RunContext.create(preset="default", config_snapshot={"big": "x" * 200_000})
+    stop = threading.Event()
+    errors = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                rc.RunContext.resume(ctx.run_dir)
+            except Exception as exc:  # noqa: BLE001 -- any failure is the bug
+                errors.append(exc)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    for _ in range(50):
+        ctx.start_phase(PhaseName.INGEST)
+    stop.set()
+    thread.join()
+    assert errors == []
+    assert not list(ctx.run_dir.glob(".manifest.*.tmp"))

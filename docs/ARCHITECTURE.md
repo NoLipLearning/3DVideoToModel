@@ -327,9 +327,24 @@ Then `scale.py`, `validate.py` (assert `is_watertight`, `is_winding_consistent`,
 FastAPI: drag-and-drop upload, preset picker, single-worker job queue, SSE progress stream, `<model-viewer>` GLB preview, STL download. No JS build step — CDN only.
 **Verify:** `uv run v2m serve` → browser at `:8000` → upload → watch progress → preview → download.
 
+**Actually achieved:** verified in a real (headless) Chromium driven by Playwright against `v2m serve`. The script chose `sample.mp4` in the file input, picked "Quick preview", and clicked Build. It watched the phase list go running → complete over SSE, waited for `<model-viewer>` to report the GLB `loaded` (real WebGL through SwiftShader), and downloaded the STL, which is binary, watertight, and named after the run. Screenshots confirmed the model renders upright on its base. Notes:
+- **`<model-viewer>` comes from Google's own CDN (`ajax.googleapis.com`)**. jsdelivr and unpkg are network-blocked in this sandbox; Google's is not, and it's the upstream-documented host anyway.
+- **The GLB is now written in glTF's convention: +Y up, metres.** trimesh writes coordinates as given, so the Z-up millimetre model showed lying on its back and 1000× too large for AR. STL/OBJ stay Z-up in mm for slicers.
+- **Bug found here: `RunContext.save()` wasn't atomic.** `write_text` truncates first, so the UI polling a manifest while the worker wrote it read an empty file (599 reader errors in 50 saves in a regression test). A kill mid-write could also have left a corrupt manifest and made `--resume` impossible. It now writes a temp file and `os.replace`s it.
+- **One job at a time** (a single worker thread), because each heavy phase already uses every core and the preflight budget assumes one run per machine. Queued uploads show how many jobs are ahead of them. Runs persist on disk, so the history list and "Resume" (the same code as `v2m run --resume`) survive a server restart. Only the live event stream doesn't.
+- **SSE supports `Last-Event-ID`**: a reconnecting browser gets only what it missed. The stream carries phase transitions plus the pipeline's own log lines.
+- **Local-only by default:** it binds 127.0.0.1 and has no auth. Run ids from URLs are validated and path-confined, and only four named output files are served.
+
+**Also in this milestone:** the ArUco scale is now automatic, as Section 3.4 describes. `--aruco-marker-mm 100` alone scans every frame and uses the one where the marker appears largest. `--aruco-image` remains as an override. Previously the user had to name a frame they couldn't know before Phase 1 ran.
+
 ### M8 — Guided live capture
 `capture/live.py`: OpenCV camera loop with a quality HUD (sharpness bar, accepted-frame counter, baseline/coverage indicator), writing accepted frames directly to `frames/` so it enters the pipeline at M2 — *no SLAM*.
 **Verify:** capture a desk object live, reconstruct it with `--from-frames`.
+
+**Actually achieved (with a stand-in camera):** this sandbox has no camera or display, so `v2m capture --source tests/fixtures/sample.mp4 --no-preview` fed the fixture video through the *same* loop a webcam uses. It kept 44 of 70 frames. `v2m run --from-frames <folder> --preset fast` then produced a watertight model. HUD frames rendered to PNG show the sharpness bar with its threshold tick, the "new view since last keep" bar with the redundancy tick, the kept/budget counter, the status line, and a green flash on each kept frame. **Not verified here:** an actual webcam feed and the interactive window (space/q). Both are plain `cv2.VideoCapture(0)` / `cv2.imshow` and need a Mac to confirm. Notes:
+- **The live gates are Phase 1's gates, decided per frame.** The adaptive blur threshold uses a rolling 60-frame median, so it follows the lighting as you move. The ORB redundancy test is against the last *kept* frame. `1 − overlap` is the HUD's baseline bar, so "keep moving" and "slow down" come from the same number that decides keeping.
+- **No fake coverage map.** Without pose tracking (no SLAM, by design), "coverage" is kept/budget. The HUD tells you to walk all the way around instead of claiming to know which sides are done.
+- **`--from-frames` takes any image folder**, not just capture output. A capture folder (marked by `capture.json`) keeps its live accept decisions. A plain photo folder gets the blur/degenerate gates and the even-spread budget trim, but no redundancy gate: photos are deliberate. The manifest records `source_frames`, so `--resume` and `--rerun-from ingest` work as they do for videos.
 
 ### M9 — Optional quality backends
 `openmvs.py` (CPU MVS when the binary exists), `hloc_backend.py` (ALIKED+LightGlue for low texture), scene tiling for large captures, moving-object suppression.

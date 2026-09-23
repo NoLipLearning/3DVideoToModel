@@ -13,9 +13,9 @@ lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Status
 
-M0–M6 are complete: the whole video → STL pipeline runs end to end, is
-resumable, and writes a per-run HTML report. See `CLAUDE.md` for the
-milestone checklist.
+M0–M8 are complete: the whole video → STL pipeline runs end to end, is
+resumable, writes a per-run HTML report, and has a local web UI and a
+guided live-capture mode. See `CLAUDE.md` for the milestone checklist.
 
 ## Quickstart
 
@@ -40,7 +40,7 @@ uv run ruff check .  # lint
 ```bash
 uv run v2m run clip.mov --preset object      # video in -> runs/<id>/output/model.stl
 uv run v2m run clip.mov --preset fast        # quick preview (sparse-only, low res)
-uv run v2m run clip.mov --aruco-image 000012.jpg --aruco-marker-mm 100   # real-world scale
+uv run v2m run clip.mov --aruco-marker-mm 100   # real-world scale from a printed marker in view
 ```
 
 Every run lives in `runs/<timestamp>_<id>/` with a `manifest.json` and a
@@ -55,3 +55,20 @@ uv run v2m run --resume runs/<id> --rerun-from mesh                  # redo Phas
 
 Each phase can also be run on its own: `v2m extract`, `sfm`, `dense`,
 `mesh`, `printprep`.
+
+### Web UI
+
+```bash
+uv run v2m serve          # http://127.0.0.1:8000 -- drag in a video, watch it build, preview, download
+```
+
+### Guided live capture
+
+```bash
+uv run v2m capture -o captures/mug            # webcam + quality HUD; space pauses, q finishes
+uv run v2m run --from-frames captures/mug     # reconstruct what you captured
+```
+
+The HUD keeps only frames that are sharp and show something new, and tells
+you when to slow down or keep moving. `--from-frames` also accepts any
+folder of photos.

@@ -70,3 +70,15 @@ def test_export_writes_binary_stl_obj_and_glb(tmp_path):
     reloaded = trimesh.load(str(tmp_path / "model.stl"))
     assert reloaded.is_watertight
     assert reloaded.volume == pytest.approx(20 * 30 * 40)
+
+
+def test_glb_is_y_up_in_metres_while_stl_stays_z_up_in_mm(tmp_path):
+    tall = trimesh.creation.box(extents=[20, 30, 40])  # tallest along Z, in mm
+    tall.apply_translation([0, 0, 20])  # sitting on z=0
+    export.export_mesh(tall, tmp_path)
+
+    glb = trimesh.load(str(tmp_path / "model.glb"), force="mesh")
+    np.testing.assert_allclose(glb.extents, [0.020, 0.040, 0.030], atol=1e-9)
+    assert glb.bounds[0][1] == pytest.approx(0.0, abs=1e-9)  # still resting on the "floor"
+    stl = trimesh.load(str(tmp_path / "model.stl"))
+    np.testing.assert_allclose(stl.extents, [20, 30, 40])

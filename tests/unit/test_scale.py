@@ -64,3 +64,15 @@ def test_aruco_recovers_the_metric_distance():
 def test_aruco_returns_none_without_a_marker():
     blank = np.full((480, 640, 3), 255, dtype=np.uint8)
     assert scale.resolve_scale_aruco(blank, _CAMERA, 100.0, colmap_distance_mm=150.0) is None
+
+
+def test_find_aruco_image_picks_the_frame_where_the_marker_is_largest(tmp_path):
+    cv2.imwrite(str(tmp_path / "000000.jpg"), np.full((480, 640, 3), 255, np.uint8))
+    cv2.imwrite(str(tmp_path / "000001.jpg"), _marker_scene(100.0, distance_mm=900.0))
+    cv2.imwrite(str(tmp_path / "000002.jpg"), _marker_scene(100.0, distance_mm=400.0))
+    assert scale.find_aruco_image(tmp_path) == "000002.jpg"
+
+
+def test_find_aruco_image_returns_none_without_a_marker(tmp_path):
+    cv2.imwrite(str(tmp_path / "000000.jpg"), np.full((480, 640, 3), 255, np.uint8))
+    assert scale.find_aruco_image(tmp_path) is None
