@@ -86,8 +86,12 @@ def test_missing_frames_raises_sfm_error_with_remedy(tmp_path):
 def test_total_failure_writes_diagnostics_before_raising(sfm_fixture, tmp_path):
     images_dir = sfm_fixture["images_dir"]
     # An impossibly strict threshold on both passes rejects virtually
-    # every feature -> zero registered images on both attempts.
-    config = SfmConfig(sift_peak_threshold=5.0, sift_peak_threshold_retry=5.0)
+    # every feature -> zero registered images on both attempts. (With the
+    # M9 learned-feature fallback on, DISK would rescue it -- that's
+    # test_learned_fallback_rescues_a_failed_sift_run.)
+    config = SfmConfig(
+        sift_peak_threshold=5.0, sift_peak_threshold_retry=5.0, learned_fallback=False
+    )
     output_dir = tmp_path / "sfm_fail"
 
     with pytest.raises(SfMError) as exc_info:

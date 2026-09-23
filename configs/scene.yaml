@@ -15,3 +15,5 @@ sfm:
 dense:
   tsdf_voxel_size_m: 0.02
   tsdf_sdf_trunc_m: 0.06
+  nominal_capture_distance_m: 5.0   # 2cm voxels at a typical 5m walking distance
+  suppress_transients: true         # streets have passers-by

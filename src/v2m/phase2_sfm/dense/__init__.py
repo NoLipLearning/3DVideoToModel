@@ -1,8 +1,8 @@
 """Dense-reconstruction backends.
 
 `monodepth_tsdf.py` (M3) is the default on Apple Silicon (no CUDA).
-`openmvs.py` (M9, optional) requires the external OpenMVS binary and is
-only reachable when CUDA happens to be present. `sparse_only.py` (M3) is
+`openmvs.py` (M9, optional) runs the external OpenMVS binaries on the CPU
+and is opt-in only (`dense.backend=openmvs`); "auto" never selects it. `sparse_only.py` (M3) is
 the always-works fallback and the `fast` preset's backend.
 
 `densify()` below is this subpackage's public entry point -- the `dense/`
@@ -19,7 +19,7 @@ from pathlib import Path
 from v2m import capability
 from v2m.config import DenseConfig
 from v2m.errors import SfMError
-from v2m.phase2_sfm.dense import monodepth_tsdf, sparse_only
+from v2m.phase2_sfm.dense import monodepth_tsdf, openmvs, sparse_only
 from v2m.types import DenseResult
 
 
@@ -47,11 +47,8 @@ def densify(
     if backend == "sparse_only":
         return sparse_only.densify(sfm_dir, output_dir, config)
     if backend == "openmvs":
-        raise SfMError(
-            "The openmvs dense backend is not implemented yet (M9).",
-            remedy="Set dense.backend to 'monodepth_tsdf' or 'sparse_only', or use --preset fast.",
-        )
+        return openmvs.densify(sfm_dir, output_dir, config)
     raise SfMError(
         f"Unknown dense backend '{backend}'.",
-        remedy="Set dense.backend to one of: auto, monodepth_tsdf, sparse_only.",
+        remedy="Set dense.backend to one of: auto, monodepth_tsdf, sparse_only, openmvs.",
     )

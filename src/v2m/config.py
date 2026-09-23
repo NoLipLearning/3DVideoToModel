@@ -59,6 +59,10 @@ class SfmConfig(BaseModel):
     clahe_clip_limit: float = 2.0
     clahe_tile_grid: int = 8
     min_triangulation_angle_deg: float = 2.0
+    feature_backend: Literal["sift", "disk", "aliked"] = "sift"
+    learned_fallback: bool = True
+    learned_max_keypoints: int = 2048
+    learned_resize_px: int = 1024
 
 
 class DenseConfig(BaseModel):
@@ -70,7 +74,10 @@ class DenseConfig(BaseModel):
     poisson_point_threshold: int = 2_000_000
     poisson_depth_low: int = 10
     poisson_depth_high: int = 11
-    scene_tile_threshold_m: float = 30.0
+    nominal_capture_distance_m: float = 0.5
+    max_tiles: int = 27
+    suppress_transients: bool = False
+    transient_min_views: int = 2
     openmvs_cuda_device: int = -2
 
 

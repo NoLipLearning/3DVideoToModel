@@ -25,6 +25,7 @@ MPS-accelerated); see `docs/ARCHITECTURE.md` Section 2 for why, and
 
 ```bash
 uv sync                    # install all dependencies (torch resolves from default PyPI -- see the comment in pyproject.toml [tool.uv] for the Linux/Windows CPU-only opt-in)
+uv sync --extra learned    # + kornia, for learned features (sfm.feature_backend=disk); a plain `uv sync` removes it again
 uv run v2m doctor          # capability probe: what's installed, what backend will be used, why
 uv run v2m presets         # list config presets (default, object, scene, fast)
 uv run pytest              # unit tests; slow/integration tests are marked `slow` and skip without colmap
@@ -139,6 +140,10 @@ src/v2m/
   own bounding box. If you're on macOS (the actual target) and confirm
   `ScalableTSDFVolume` works there, that one function is the only call
   site that would need to change back.
+- **Learned features are written into COLMAP's database**, then COLMAP's
+  own verification and mapper run as usual (`backends/hloc_backend.py`).
+  Keypoints go in at full resolution with COLMAP's +0.5 pixel-centre
+  offset, and the database must exist before `pycolmap.import_images`.
 - **COLMAP's own reconstruction scale is arbitrary, not metric** —
   monocular SfM normalizes the first registered pair's baseline to an
   unknown length; true scale isn't established until Phase 4's
@@ -175,7 +180,7 @@ src/v2m/
 - [x] M6 — end-to-end `v2m run` + `--resume`
 - [x] M7 — local web UI
 - [x] M8 — guided live capture (verified with a video standing in for the camera; real webcam untested here)
-- [ ] M9 — optional quality backends (OpenMVS, hloc/ALIKED, tiling)
+- [x] M9 — optional quality backends: learned features (DISK verified; ALIKED weights unreachable here), tiling, transient suppression, OpenMVS (orchestration only -- binary not installed here)
 
 Update the checkbox when a milestone's verification step (in
 `docs/ARCHITECTURE.md`) actually passes — not just when the code is

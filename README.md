@@ -13,9 +13,12 @@ lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Status
 
-M0–M8 are complete: the whole video → STL pipeline runs end to end, is
-resumable, writes a per-run HTML report, and has a local web UI and a
-guided live-capture mode. See `CLAUDE.md` for the milestone checklist.
+All milestones (M0–M9) are complete: the whole video → STL pipeline runs
+end to end, is resumable, writes a per-run HTML report, and has a local
+web UI, a guided live-capture mode, and optional quality backends
+(learned features, scene tiling, moving-object suppression, OpenMVS).
+See `CLAUDE.md` for the milestone checklist and what each was verified
+against.
 
 ## Quickstart
 
@@ -72,3 +75,12 @@ uv run v2m run --from-frames captures/mug     # reconstruct what you captured
 The HUD keeps only frames that are sharp and show something new, and tells
 you when to slow down or keep moving. `--from-frames` also accepts any
 folder of photos.
+
+### Optional quality backends
+
+```bash
+uv sync --extra learned                                    # kornia, for learned features
+uv run v2m run clip.mov --set sfm.feature_backend=disk     # DISK + LightGlue: better on low texture
+uv run v2m run street.mov --preset scene                   # tiling + moving-object suppression on
+uv run v2m run clip.mov --set dense.backend=openmvs        # needs OpenMVS on PATH (CPU mode)
+```

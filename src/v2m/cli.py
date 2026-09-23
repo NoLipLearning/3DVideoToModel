@@ -123,9 +123,8 @@ def doctor() -> None:
     if caps.has_cuda:
         console.print(
             "[yellow]CUDA detected.[/yellow] This is NOT the target platform (Apple Silicon, no "
-            "CUDA) -- COLMAP dense MVS becomes technically available here, but the pipeline still "
-            f"defaults to '{caps.dense_backend}' unless config explicitly opts into an "
-            "OpenMVS/CUDA path."
+            "CUDA). The pipeline still never calls COLMAP's patch_match_stereo and defaults to "
+            f"'{caps.dense_backend}'; OpenMVS is opt-in with --set dense.backend=openmvs."
         )
     else:
         console.print(

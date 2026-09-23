@@ -140,8 +140,9 @@ class LowKeypointImage(BaseModel):
 class SfmDiagnostics(BaseModel):
     """Written to `sfm/diagnostics.json` on every sparse-SfM attempt,
     success or failure -- docs/ARCHITECTURE.md Section 4 (M2): "Diagnostics
-    JSON written even on failure." `attempt` is 1 for the initial pass and
-    2 for the Section 3.1 retry (lowered SIFT peak_threshold).
+    JSON written even on failure." `attempt` is 1 for the initial pass,
+    2 for the Section 3.1 retry (lowered SIFT peak_threshold), and 3 for
+    the M9 learned-feature fallback (DISK + LightGlue).
     """
 
     num_images_total: int

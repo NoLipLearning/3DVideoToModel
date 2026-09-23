@@ -92,10 +92,13 @@ class Capabilities:
 
     @property
     def dense_backend(self) -> str:
-        """Which Phase 2b backend `sfm.py` should select when config says "auto"."""
-        if self.has_colmap_dense and self.openmvs_binary:
-            # Only reachable with CUDA present -- never the Apple Silicon path.
-            return "openmvs"
+        """Which Phase 2b backend `sfm.py` should select when config says "auto".
+
+        Never "openmvs", even when it's installed: it's opt-in
+        (`dense.backend=openmvs`, see phase2_sfm/dense/openmvs.py), because
+        monocular depth is the only backend that copes with textureless
+        surfaces (docs/ARCHITECTURE.md Section 3.1).
+        """
         torch_ok = self.libs.get("torch", LibStatus("torch", False)).available
         open3d_ok = self.libs.get("open3d", LibStatus("open3d", False)).available
         if torch_ok and open3d_ok:

@@ -10,6 +10,7 @@ retry/backend-selection logic.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import shutil
@@ -21,7 +22,7 @@ import pycolmap
 from v2m.config import SfmConfig
 from v2m.errors import SfMError
 from v2m.phase2_sfm import diagnostics as diagnostics_module
-from v2m.phase2_sfm.backends import colmap_backend
+from v2m.phase2_sfm.backends import colmap_backend, hloc_backend
 from v2m.types import SfmDiagnostics, SfmResult
 
 logger = logging.getLogger("v2m.phase2_sfm.sfm")
@@ -82,7 +83,10 @@ def _run_one_attempt(
 
     num_images_total = len(list(images_dir.glob("*.jpg")))
 
-    colmap_backend.extract_and_match(images_dir, database_path, config)
+    if config.feature_backend == "sift":
+        colmap_backend.extract_and_match(images_dir, database_path, config)
+    else:
+        hloc_backend.extract_and_match(images_dir, database_path, config)
 
     mapper_options = pycolmap.IncrementalPipelineOptions()
     reconstructions = pycolmap.incremental_mapping(
@@ -165,7 +169,7 @@ def run_sparse_sfm(images_dir: Path, output_dir: Path, config: SfmConfig) -> Sfm
     reconstruction, diag = _run_one_attempt(effective_images_dir, output_dir, config, attempt=1)
 
     needs_retry = reconstruction is None or diag.registration_rate < config.registration_rate_min
-    if needs_retry:
+    if needs_retry and config.feature_backend == "sift":
         logger.warning(
             "Initial sparse SfM pass registered %d/%d images (rate %.2f) -- retrying with a "
             "lowered SIFT peak_threshold (%.4f -> %.4f) per docs/ARCHITECTURE.md Section 3.1.",
@@ -183,6 +187,28 @@ def run_sparse_sfm(images_dir: Path, output_dir: Path, config: SfmConfig) -> Sfm
         )
         if retry_diag.num_images_registered >= diag.num_images_registered:
             reconstruction, diag = retry_reconstruction, retry_diag
+
+    still_short = reconstruction is None or diag.registration_rate < config.registration_rate_min
+    if still_short and config.feature_backend == "sift" and config.learned_fallback:
+        # Section 3.1 #4: learned features are the next resort on low
+        # texture. Only when they're installed -- never a hard dependency.
+        if importlib.util.find_spec("kornia") is not None:
+            logger.warning(
+                "SIFT registered %d/%d images; trying learned features (DISK + LightGlue).",
+                diag.num_images_registered,
+                diag.num_images_total,
+            )
+            learned_config = config.model_copy(update={"feature_backend": "disk"})
+            learned_reconstruction, learned_diag = _run_one_attempt(
+                effective_images_dir, output_dir, learned_config, attempt=3
+            )
+            if learned_diag.num_images_registered > diag.num_images_registered:
+                reconstruction, diag = learned_reconstruction, learned_diag
+        else:
+            logger.info(
+                "SIFT registration is low; learned features could help "
+                "(`uv sync --extra learned`, then --set sfm.feature_backend=disk)."
+            )
 
     diagnostics_module.write_diagnostics(diag, output_dir / "diagnostics.json")
 

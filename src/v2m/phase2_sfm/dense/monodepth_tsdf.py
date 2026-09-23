@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -44,7 +45,7 @@ import pycolmap
 
 from v2m.config import DenseConfig
 from v2m.errors import SfMError
-from v2m.phase2_sfm.dense import depth_alignment
+from v2m.phase2_sfm.dense import depth_alignment, tiling, transients
 from v2m.types import DenseResult
 
 logger = logging.getLogger("v2m.phase2_sfm.dense.monodepth_tsdf")
@@ -281,6 +282,108 @@ def _build_tsdf_volume(
     )
 
 
+# Transient points must be seen through by at least this many voxels' worth
+# of depth before a frame counts as a free-space violation -- the same
+# order as the TSDF truncation band (5 voxels by default), a little under
+# it so that ordinary depth noise on a real surface never votes against it.
+_TRANSIENT_TOLERANCE_VOXELS = 3.0
+_TILE_MARGIN_VOXELS = 8
+
+
+@dataclass
+class _AlignedFrame:
+    """One image's metric depth map, saved to disk, plus what's needed to
+    integrate it -- so tiles can re-read frames instead of holding them all."""
+
+    image_path: Path
+    depth_path: Path
+    depth_trunc: float
+    intrinsic: np.ndarray
+    size: tuple[int, int]
+    extrinsic: np.ndarray
+
+    def load_depth(self) -> np.ndarray:
+        depth = np.load(self.depth_path)
+        return np.where(depth <= self.depth_trunc, depth, 0.0).astype(np.float32)
+
+    def rgbd(self) -> o3d.geometry.RGBDImage:
+        color_rgb = np.ascontiguousarray(cv2.imread(str(self.image_path))[:, :, ::-1])
+        return o3d.geometry.RGBDImage.create_from_color_and_depth(
+            o3d.geometry.Image(color_rgb),
+            o3d.geometry.Image(self.load_depth()),
+            depth_scale=1.0,
+            depth_trunc=self.depth_trunc,
+            convert_rgb_to_intensity=False,
+        )
+
+    def o3d_intrinsic(self) -> o3d.camera.PinholeCameraIntrinsic:
+        k = self.intrinsic
+        return o3d.camera.PinholeCameraIntrinsic(
+            self.size[0], self.size[1], k[0, 0], k[1, 1], k[0, 2], k[1, 2]
+        )
+
+
+def _integrate(
+    reconstruction: pycolmap.Reconstruction,
+    frames: list[_AlignedFrame],
+    config: DenseConfig,
+    median_depth: float,
+) -> tuple[o3d.geometry.PointCloud, int, float]:
+    """TSDF-integrate `frames`; returns (points, tiles used, voxel size).
+
+    One volume when the scene fits at the detail this capture supports
+    (always, for an object) -- built by `_build_tsdf_volume` exactly as
+    before tiling existed. Otherwise a grid of tiles (tiling.py), each
+    integrated from only the frames that see it and cropped to its core.
+    """
+    bbox = reconstruction.compute_bounding_box(_BBOX_TRIM_PERCENTILE, 1.0 - _BBOX_TRIM_PERCENTILE)
+    bbox_min, bbox_max = np.asarray(bbox.min), np.asarray(bbox.max)
+    voxel = tiling.desired_voxel(median_depth, config)
+    tiles = []
+    if np.all(np.isfinite(bbox_max - bbox_min)) and np.all(bbox_max > bbox_min):
+        center = (bbox_min + bbox_max) / 2
+        half = (bbox_max - bbox_min) / 2 * _BBOX_SAFETY_MARGIN
+        tiles = tiling.plan_tiles(
+            center - half, center + half, voxel, config, MAX_TSDF_RESOLUTION, _TILE_MARGIN_VOXELS
+        )
+
+    if len(tiles) <= 1:
+        volume = _build_tsdf_volume(reconstruction, config)
+        for frame in frames:
+            volume.integrate(frame.rgbd(), frame.o3d_intrinsic(), frame.extrinsic)
+        return volume.extract_point_cloud(), 1, voxel
+
+    trunc_ratio = config.tsdf_sdf_trunc_m / config.tsdf_voxel_size_m
+    footprints = [
+        tiling.sample_world_points(f.load_depth(), f.intrinsic, f.extrinsic) for f in frames
+    ]
+    merged = o3d.geometry.PointCloud()
+    for tile in tiles:
+        members = [f for f, pts in zip(frames, footprints, strict=True) if tile.touches(pts)]
+        if not members:
+            continue
+        volume = o3d.pipelines.integration.UniformTSDFVolume(
+            length=tile.length,
+            resolution=tile.resolution,
+            sdf_trunc=trunc_ratio * tile.length / tile.resolution,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+            origin=tile.origin,
+        )
+        for frame in members:
+            volume.integrate(frame.rgbd(), frame.o3d_intrinsic(), frame.extrinsic)
+        part = volume.extract_point_cloud()
+        keep = tile.contains(np.asarray(part.points))
+        merged += part.select_by_index(np.flatnonzero(keep))
+        del volume
+    logger.info(
+        "Scene tiled into %d TSDF volumes (voxel %.4g units, median depth %.4g).",
+        len(tiles),
+        voxel,
+        median_depth,
+    )
+    return merged, len(tiles), voxel
+
+
 def densify(
     sfm_dir: Path,
     output_dir: Path,
@@ -327,11 +430,10 @@ def densify(
         shutil.rmtree(depth_dir)
     depth_dir.mkdir(parents=True)
 
-    volume = _build_tsdf_volume(reconstruction, config)
-
     per_image_reports: list[dict] = []
-    integrated_count = 0
+    frames: list[_AlignedFrame] = []
     all_rmses: list[float] = []
+    median_depths: list[float] = []
 
     for image in reconstruction.images.values():
         image_path = images_dir / image.name
@@ -385,42 +487,35 @@ def densify(
         metric_inverse_depth = a * disparity + b
         with np.errstate(divide="ignore", invalid="ignore"):
             metric_depth = np.where(metric_inverse_depth > 1e-6, 1.0 / metric_inverse_depth, 0.0)
-        metric_depth = metric_depth.astype(np.float32)
+        depth_path = depth_dir / f"{Path(image.name).stem}.npy"
+        np.save(depth_path, metric_depth.astype(np.float32))
 
-        np.save(depth_dir / f"{Path(image.name).stem}.npy", metric_depth)
-
-        max_reliable_depth = float(np.max(1.0 / inverse_depths[inlier_mask]))
-        depth_trunc = _DEPTH_TRUNC_SAFETY_FACTOR * max_reliable_depth
-        metric_depth = np.where(metric_depth <= depth_trunc, metric_depth, 0.0)
-
-        color_rgb = np.ascontiguousarray(color_bgr[:, :, ::-1])
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d.geometry.Image(color_rgb),
-            o3d.geometry.Image(metric_depth),
-            depth_scale=1.0,
-            depth_trunc=depth_trunc,
-            convert_rgb_to_intensity=False,
-        )
-
+        inlier_depths = 1.0 / inverse_depths[inlier_mask]
+        median_depths.append(float(np.median(inlier_depths)))
         camera = image.camera
-        intrinsic = o3d.camera.PinholeCameraIntrinsic(
-            camera.width,
-            camera.height,
-            camera.focal_length_x,
-            camera.focal_length_y,
-            camera.principal_point_x,
-            camera.principal_point_y,
-        )
         extrinsic = np.eye(4)
         extrinsic[:3, :3] = rotation
         extrinsic[:3, 3] = translation
-
-        volume.integrate(rgbd, intrinsic, extrinsic)
-        integrated_count += 1
+        frames.append(
+            _AlignedFrame(
+                image_path=image_path,
+                depth_path=depth_path,
+                depth_trunc=_DEPTH_TRUNC_SAFETY_FACTOR * float(np.max(inlier_depths)),
+                intrinsic=np.array(
+                    [
+                        [camera.focal_length_x, 0.0, camera.principal_point_x],
+                        [0.0, camera.focal_length_y, camera.principal_point_y],
+                        [0.0, 0.0, 1.0],
+                    ]
+                ),
+                size=(camera.width, camera.height),
+                extrinsic=extrinsic,
+            )
+        )
 
     (output_dir / "alignment_report.json").write_text(json.dumps(per_image_reports, indent=2))
 
-    if integrated_count == 0:
+    if not frames:
         raise SfMError(
             "No image had enough sparse correspondences to align a metric depth map "
             f"(need >= {config.min_alignment_correspondences} per image).",
@@ -428,15 +523,33 @@ def densify(
             "weak for dense reconstruction. Re-shoot with more texture/parallax.",
         )
 
-    cloud = volume.extract_point_cloud()
+    cloud, num_tiles, voxel = _integrate(
+        reconstruction, frames, config, float(np.median(median_depths))
+    )
+    removed = 0
+    if config.suppress_transients and len(cloud.points):
+        points = np.asarray(cloud.points)
+        views = (transients.DepthView(f.load_depth(), f.intrinsic, f.extrinsic) for f in frames)
+        mask = transients.transient_mask(
+            points,
+            views,
+            tolerance=_TRANSIENT_TOLERANCE_VOXELS * voxel,
+            min_views=config.transient_min_views,
+        )
+        removed = int(mask.sum())
+        cloud = cloud.select_by_index(np.flatnonzero(~mask))
+        logger.info("Transient suppression removed %d of %d points.", removed, len(points))
+
     dense_ply_path = output_dir / "dense.ply"
     o3d.io.write_point_cloud(str(dense_ply_path), cloud)
 
     overall_rmse = float(np.mean(all_rmses)) if all_rmses else None
     logger.info(
-        "Dense reconstruction: %d/%d images integrated, %d points, mean alignment RMSE %s.",
-        integrated_count,
+        "Dense reconstruction: %d/%d images integrated into %d TSDF tile(s), %d points, "
+        "mean alignment RMSE %s.",
+        len(frames),
         len(reconstruction.images),
+        num_tiles,
         len(cloud.points),
         f"{overall_rmse:.4f}" if overall_rmse is not None else "n/a",
     )

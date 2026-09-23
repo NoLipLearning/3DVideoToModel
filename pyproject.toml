@@ -37,6 +37,10 @@ dependencies = [
 # and fall back to open3d/trimesh -- it is never required for the
 # pipeline to run.
 mesh = ["pymeshlab>=2023.12"]
+# Learned features for low-texture scenes (docs/ARCHITECTURE.md Section
+# 3.1 #4, M9): DISK / ALIKED keypoints + LightGlue matching, via kornia's
+# implementations. Optional -- the default SIFT path never imports it.
+learned = ["kornia>=0.7.3"]
 
 [dependency-groups]
 dev = [

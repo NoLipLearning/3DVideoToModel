@@ -29,6 +29,10 @@ sfm:
   clahe_clip_limit: 2.0
   clahe_tile_grid: 8
   min_triangulation_angle_deg: 2.0   # below this: likely pure rotation ("you spun in place, didn't walk around it")
+  feature_backend: sift              # sift | disk | aliked -- learned features (M9, needs `uv sync --extra learned`); Section 3.1 #4
+  learned_fallback: true             # if both SIFT passes miss registration_rate_min, try once more with DISK + LightGlue (when installed)
+  learned_max_keypoints: 2048        # per image, learned backends only
+  learned_resize_px: 1024            # learned networks run at this longest edge; keypoints are mapped back to full resolution
 
 dense:
   # auto | monodepth_tsdf | openmvs | sparse_only
@@ -42,7 +46,16 @@ dense:
   poisson_point_threshold: 2000000     # switch Poisson depth 10 -> 11 above this point count
   poisson_depth_low: 10
   poisson_depth_high: 11
-  scene_tile_threshold_m: 30.0         # bbox diagonal above this triggers spatial tiling (scene mode, M9)
+  # Spatial tiling (M9). Replaces the doc's metric "30 m" tile threshold,
+  # which can't be applied before Phase 4 knows the scale: the voxel this
+  # capture deserves is median_camera_depth * tsdf_voxel_size_m /
+  # nominal_capture_distance_m (a ratio, so COLMAP's arbitrary units cancel),
+  # and the scene is tiled only when one 400^3 volume can't hold that. See
+  # phase2_sfm/dense/tiling.py.
+  nominal_capture_distance_m: 0.5      # the distance tsdf_voxel_size_m is meant for (4mm at 0.5m)
+  max_tiles: 27                        # beyond this, integrate coarser rather than refuse
+  suppress_transients: false           # drop points other frames saw straight through (moving cars/people); scene preset turns it on
+  transient_min_views: 2               # ...and only when at least this many frames saw through them
   openmvs_cuda_device: -2              # -2 forces CPU in OpenMVS; never change without a real CUDA target
 
 mesh:
