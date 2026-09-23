@@ -56,5 +56,23 @@ def setup_logging(*, verbose: bool = False, run_log_path: Path | None = None) ->
         jsonl_handler = _JsonlHandler(run_log_path)
         jsonl_handler.setLevel(logging.DEBUG)
         logger.addHandler(jsonl_handler)
+        if not verbose:
+            _route_colmap_logs(run_log_path.parent)
 
     return logger
+
+
+def _route_colmap_logs(run_dir: Path) -> None:
+    """Send COLMAP's own (glog) INFO chatter -- hundreds of lines per SfM
+    pass -- to `<run_dir>/colmap.log.*` instead of the terminal, keeping
+    warnings and errors on stderr. Nothing is lost: the file has every
+    line, for debugging a bad reconstruction after the fact."""
+    try:
+        import pycolmap
+    except ImportError:
+        return
+    glog = pycolmap.logging
+    glog.logtostderr = False
+    glog.alsologtostderr = False
+    glog.stderrthreshold = 1  # WARNING
+    glog.set_log_destination(glog.Level.INFO, str(run_dir / "colmap.log."))

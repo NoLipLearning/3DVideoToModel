@@ -58,6 +58,13 @@ class GeometricDepthEstimator:
 
 
 @pytest.fixture(scope="session")
+def geometric_depth_estimator_cls():
+    """`GeometricDepthEstimator` itself, for tests that build their own
+    (e.g. once a pipeline run has produced its own frames.json)."""
+    return GeometricDepthEstimator
+
+
+@pytest.fixture(scope="session")
 def sfm_fixture(tmp_path_factory) -> dict:
     """Runs Phase 1 + Phase 2a (default config) once for the whole test
     session against tests/fixtures/sample.mp4.

@@ -20,17 +20,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from v2m import capability
+from v2m import capability, pipeline
 from v2m import run_context as rc
 from v2m.config import list_presets, load_config
 from v2m.errors import V2MError
 from v2m.logging_setup import setup_logging
-from v2m.phase1_ingest.extract import run_extract
-from v2m.phase2_sfm.dense import densify
-from v2m.phase2_sfm.sfm import run_sparse_sfm
-from v2m.phase3_mesh import build_mesh
-from v2m.phase4_print import run_print_prep
-from v2m.types import PhaseName
+from v2m.types import PhaseName, PhaseStatus
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
@@ -158,6 +153,47 @@ def presets() -> None:
         console.print(f"- {name}")
 
 
+def _attach(run_dir: Path, preset: str, *, source_video: str | None = None):
+    """Attach a per-phase command to `run_dir` (creating the run if it's
+    new), set up logging, and note a preset mismatch."""
+    cfg = load_config(preset)
+    ctx = rc.RunContext.at(
+        run_dir,
+        preset=preset,
+        config_snapshot=cfg.model_dump(mode="json"),
+        source_video=source_video,
+    )
+    if source_video is not None and ctx.manifest.source_video != source_video:
+        ctx.manifest.source_video = source_video
+        ctx.save()
+    if ctx.manifest.preset != preset:
+        console.print(
+            f"[yellow]Note:[/yellow] existing run at {run_dir} was created with preset "
+            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach. Delete "
+            "the directory (or use a new one) to start fresh with a different preset."
+        )
+    setup_logging(run_log_path=ctx.log_path)
+    return ctx, cfg
+
+
+def _run_single(ctx, cfg, phase: PhaseName, **kwargs):
+    """One phase with manifest bookkeeping; prints the error + remedy and
+    exits non-zero on a V2MError."""
+    try:
+        return pipeline.run_phase(ctx, cfg, phase, **kwargs)
+    except V2MError as exc:
+        _print_error(f"{pipeline.PHASE_LABELS[phase]} failed", exc)
+        if phase == PhaseName.SFM_SPARSE:
+            console.print(f"See {ctx.sfm_dir / 'diagnostics.json'} for details.")
+        raise typer.Exit(code=1) from exc
+
+
+def _print_error(title: str, exc: V2MError) -> None:
+    console.print(f"[red]{title}:[/red] {exc.message}")
+    if exc.remedy:
+        console.print(f"  [yellow]→[/yellow] {exc.remedy}")
+
+
 @app.command()
 def extract(
     video: str,
@@ -166,49 +202,13 @@ def extract(
 ) -> None:
     """Phase 1: extract a filtered frame set from a video."""
     video_path = Path(video)
-    output_dir = Path(output)
-
     if not video_path.exists():
         console.print(f"[red]Video not found:[/red] {video_path}")
         raise typer.Exit(code=1)
 
-    cfg = load_config(preset)
-    ctx = rc.RunContext.at(
-        output_dir,
-        preset=preset,
-        config_snapshot=cfg.model_dump(),
-        source_video=str(video_path),
-    )
-    if ctx.manifest.preset != preset:
-        console.print(
-            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
-            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach. Delete "
-            "the directory (or use a new one) to start fresh with a different preset."
-        )
-    setup_logging(run_log_path=ctx.log_path)
-
-    ctx.start_phase(PhaseName.INGEST, input_hash=rc.hash_file(video_path))
-    try:
-        summary = run_extract(video_path, ctx.run_dir, cfg.ingest)
-    except V2MError as exc:
-        ctx.fail_phase(PhaseName.INGEST, exc.message)
-        console.print(f"[red]Ingest failed:[/red] {exc.message}")
-        if exc.remedy:
-            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
-        raise typer.Exit(code=1) from exc
-
-    ctx.complete_phase(PhaseName.INGEST, artifacts={"frames_json": summary.frames_json_path})
-
-    table = Table(title="Ingest summary")
-    table.add_column("Metric")
-    table.add_column("Count", justify="right")
-    table.add_row("Total frames decoded", str(summary.total_frames))
-    table.add_row("Accepted", f"[green]{summary.accepted}[/green]")
-    table.add_row("Rejected: blur", str(summary.rejected_blur))
-    table.add_row("Rejected: redundant", str(summary.rejected_redundant))
-    table.add_row("Rejected: frame budget", str(summary.rejected_budget))
-    table.add_row("Blur threshold used", f"{summary.blur_threshold:.1f}")
-    console.print(table)
+    ctx, cfg = _attach(Path(output), preset, source_video=str(video_path))
+    summary = _run_single(ctx, cfg, PhaseName.INGEST)
+    _print_phase_summary(PhaseName.INGEST, summary)
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
@@ -218,57 +218,15 @@ def sfm_cmd(
     preset: str = typer.Option("object", "--preset"),
 ) -> None:
     """Phase 2a: sparse structure-from-motion. Expects frames/ already populated by `extract`."""
-    output_dir = Path(run_dir)
-
-    cfg = load_config(preset)
-    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
-    if ctx.manifest.preset != preset:
-        console.print(
-            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
-            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
-        )
-    setup_logging(run_log_path=ctx.log_path)
-
-    ctx.start_phase(PhaseName.SFM_SPARSE)
-    try:
-        result = run_sparse_sfm(ctx.frames_dir, ctx.sfm_dir, cfg.sfm)
-    except V2MError as exc:
-        ctx.fail_phase(PhaseName.SFM_SPARSE, exc.message)
-        console.print(f"[red]Sparse SfM failed:[/red] {exc.message}")
-        if exc.remedy:
-            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
-        console.print(f"See {ctx.sfm_dir / 'diagnostics.json'} for details.")
-        raise typer.Exit(code=1) from exc
-
-    ctx.complete_phase(
-        PhaseName.SFM_SPARSE,
-        artifacts={
-            "sparse_points": result.sparse_points_path,
-            "cameras": result.cameras_path,
-        },
-    )
-
-    table = Table(title="Sparse SfM summary")
-    table.add_column("Metric")
-    table.add_column("Value", justify="right")
-    registration_rate = (
-        result.num_images_registered / result.num_images_total if result.num_images_total else 0.0
-    )
-    table.add_row(
-        "Registered images",
-        f"[green]{result.num_images_registered}/{result.num_images_total}[/green] "
-        f"({registration_rate:.0%})",
-    )
-    table.add_row("Mean reprojection error", f"{result.mean_reprojection_error_px:.3f} px")
-    table.add_row("Mean track length", f"{result.mean_track_length:.2f}")
-    console.print(table)
+    ctx, cfg = _attach(Path(run_dir), preset)
+    result = _run_single(ctx, cfg, PhaseName.SFM_SPARSE)
+    _print_phase_summary(PhaseName.SFM_SPARSE, result)
 
     diagnostics_path = ctx.sfm_dir / "diagnostics.json"
     if diagnostics_path.exists():
         diagnostics = json.loads(diagnostics_path.read_text())
         for warning in diagnostics.get("warnings", []):
             console.print(f"[yellow]Warning:[/yellow] {warning}")
-
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
@@ -278,40 +236,9 @@ def dense(
     preset: str = typer.Option("object", "--preset"),
 ) -> None:
     """Phase 2b: dense point cloud. Expects sfm/ already populated by `sfm`."""
-    output_dir = Path(run_dir)
-
-    cfg = load_config(preset)
-    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
-    if ctx.manifest.preset != preset:
-        console.print(
-            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
-            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
-        )
-    setup_logging(run_log_path=ctx.log_path)
-
-    ctx.start_phase(PhaseName.SFM_DENSE)
-    try:
-        result = densify(ctx.sfm_dir, ctx.dense_dir, cfg.dense)
-    except V2MError as exc:
-        ctx.fail_phase(PhaseName.SFM_DENSE, exc.message)
-        console.print(f"[red]Dense reconstruction failed:[/red] {exc.message}")
-        if exc.remedy:
-            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
-        raise typer.Exit(code=1) from exc
-
-    ctx.complete_phase(
-        PhaseName.SFM_DENSE,
-        artifacts={"dense_points": result.dense_points_path},
-    )
-
-    table = Table(title="Dense reconstruction summary")
-    table.add_column("Metric")
-    table.add_column("Value", justify="right")
-    table.add_row("Backend", result.backend)
-    table.add_row("Dense points", f"[green]{result.num_points:,}[/green]")
-    if result.alignment_rmse is not None:
-        table.add_row("Mean alignment RMSE (1/units)", f"{result.alignment_rmse:.6g}")
-    console.print(table)
+    ctx, cfg = _attach(Path(run_dir), preset)
+    result = _run_single(ctx, cfg, PhaseName.SFM_DENSE)
+    _print_phase_summary(PhaseName.SFM_DENSE, result)
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
@@ -321,70 +248,19 @@ def mesh(
     preset: str = typer.Option("object", "--preset"),
 ) -> None:
     """Phase 3: raw surface mesh. Expects dense/ already populated by `dense`."""
-    output_dir = Path(run_dir)
-
-    cfg = load_config(preset)
-    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
-    if ctx.manifest.preset != preset:
-        console.print(
-            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
-            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
-        )
-    setup_logging(run_log_path=ctx.log_path)
-
-    ctx.start_phase(PhaseName.MESH)
-    try:
-        result = build_mesh(ctx.dense_dir, ctx.sfm_dir, ctx.mesh_dir, cfg.dense, cfg.mesh)
-    except V2MError as exc:
-        ctx.fail_phase(PhaseName.MESH, exc.message)
-        console.print(f"[red]Meshing failed:[/red] {exc.message}")
-        if exc.remedy:
-            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
-        raise typer.Exit(code=1) from exc
-
-    ctx.complete_phase(PhaseName.MESH, artifacts={"mesh": result.mesh_path})
-
-    table = Table(title="Raw mesh summary")
-    table.add_column("Metric")
-    table.add_column("Value", justify="right")
-    table.add_row("Vertices", f"{result.num_vertices:,}")
-    table.add_row("Faces", f"{result.num_faces:,}")
-    table.add_row(
-        "Edge/vertex manifold",
-        "[green]yes[/green]" if result.is_manifold else "[yellow]no[/yellow]",
-    )
-    console.print(table)
+    ctx, cfg = _attach(Path(run_dir), preset)
+    result = _run_single(ctx, cfg, PhaseName.MESH)
+    _print_phase_summary(PhaseName.MESH, result)
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
 
 
-@app.command()
-def printprep(
-    run_dir: str,
-    preset: str = typer.Option("object", "--preset"),
-    scale_factor: float | None = typer.Option(
-        None, "--scale-factor", help="mm per reconstruction unit, if already known."
-    ),
-    scale_points: str | None = typer.Option(
-        None,
-        "--scale-points",
-        help='Two points in mesh/cleaned.ply coords, "x,y,z;x,y,z" (with --scale-distance-mm).',
-    ),
-    scale_distance_mm: float | None = typer.Option(
-        None, "--scale-distance-mm", help="Real distance between the two --scale-points."
-    ),
-    aruco_image: str | None = typer.Option(
-        None, "--aruco-image", help="Frame (e.g. 000012.jpg) showing a printed ArUco marker."
-    ),
-    aruco_marker_mm: float | None = typer.Option(
-        None, "--aruco-marker-mm", help="Printed edge length of the ArUco marker."
-    ),
-    target_size_mm: float | None = typer.Option(
-        None, "--target-size", help="Longest-axis size when no metric reference is given."
-    ),
-) -> None:
-    """Phase 4: watertight, scaled, print-ready export. Expects mesh/ populated by `mesh`."""
-    output_dir = Path(run_dir)
-
+def _print_options(
+    scale_factor: float | None,
+    scale_points: str | None,
+    scale_distance_mm: float | None,
+    aruco_image: str | None,
+    aruco_marker_mm: float | None,
+) -> pipeline.PrintOptions:
     two_point = None
     if scale_points is not None or scale_distance_mm is not None:
         if scale_points is None or scale_distance_mm is None:
@@ -398,46 +274,98 @@ def printprep(
             console.print(f'[red]--scale-points must look like "x,y,z;x,y,z":[/red] {exc}')
             raise typer.Exit(code=1) from exc
         two_point = (point_a, point_b, scale_distance_mm)
+    if (aruco_image is None) != (aruco_marker_mm is None):
+        console.print("[red]--aruco-image and --aruco-marker-mm go together.[/red]")
+        raise typer.Exit(code=1)
+    return pipeline.PrintOptions(
+        scale_factor=scale_factor,
+        scale_two_point=two_point,
+        aruco_image_name=aruco_image,
+        aruco_marker_mm=aruco_marker_mm,
+    )
 
-    cfg = load_config(preset)
+
+_SCALE_FACTOR_OPT = typer.Option(
+    None, "--scale-factor", help="mm per reconstruction unit, if already known."
+)
+_SCALE_POINTS_OPT = typer.Option(
+    None,
+    "--scale-points",
+    help='Two points in mesh/cleaned.ply coords, "x,y,z;x,y,z" (with --scale-distance-mm).',
+)
+_SCALE_DISTANCE_OPT = typer.Option(
+    None, "--scale-distance-mm", help="Real distance between the two --scale-points."
+)
+_ARUCO_IMAGE_OPT = typer.Option(
+    None, "--aruco-image", help="Frame (e.g. 000012.jpg) showing a printed ArUco marker."
+)
+_ARUCO_MM_OPT = typer.Option(
+    None, "--aruco-marker-mm", help="Printed edge length of the ArUco marker."
+)
+_TARGET_SIZE_OPT = typer.Option(
+    None, "--target-size", help="Longest-axis size in mm when no metric reference is given."
+)
+
+
+@app.command()
+def printprep(
+    run_dir: str,
+    preset: str = typer.Option("object", "--preset"),
+    scale_factor: float | None = _SCALE_FACTOR_OPT,
+    scale_points: str | None = _SCALE_POINTS_OPT,
+    scale_distance_mm: float | None = _SCALE_DISTANCE_OPT,
+    aruco_image: str | None = _ARUCO_IMAGE_OPT,
+    aruco_marker_mm: float | None = _ARUCO_MM_OPT,
+    target_size_mm: float | None = _TARGET_SIZE_OPT,
+) -> None:
+    """Phase 4: watertight, scaled, print-ready export. Expects mesh/ populated by `mesh`."""
+    options = _print_options(
+        scale_factor, scale_points, scale_distance_mm, aruco_image, aruco_marker_mm
+    )
+    ctx, cfg = _attach(Path(run_dir), preset)
     if target_size_mm is not None:
         cfg.print_prep.scale_target_size_mm = target_size_mm
-    ctx = rc.RunContext.at(output_dir, preset=preset, config_snapshot=cfg.model_dump())
-    if ctx.manifest.preset != preset:
-        console.print(
-            f"[yellow]Note:[/yellow] existing run at {output_dir} was created with preset "
-            f"'{ctx.manifest.preset}'; ignoring --preset {preset} for this attach."
-        )
-    setup_logging(run_log_path=ctx.log_path)
-
-    ctx.start_phase(PhaseName.PRINT_PREP)
-    try:
-        report = run_print_prep(
-            ctx.mesh_dir,
-            ctx.dense_dir,
-            ctx.sfm_dir,
-            ctx.output_dir,
-            cfg.mesh,
-            cfg.print_prep,
-            cfg.mode,
-            scale_factor=scale_factor,
-            scale_two_point=two_point,
-            aruco_image_name=aruco_image,
-            aruco_marker_mm=aruco_marker_mm,
-        )
-    except V2MError as exc:
-        ctx.fail_phase(PhaseName.PRINT_PREP, exc.message)
-        console.print(f"[red]Print prep failed:[/red] {exc.message}")
-        if exc.remedy:
-            console.print(f"  [yellow]→[/yellow] {exc.remedy}")
-        raise typer.Exit(code=1) from exc
-
-    ctx.complete_phase(
-        PhaseName.PRINT_PREP,
-        artifacts={"stl": "model.stl", "obj": "model.obj", "glb": "model.glb"},
-    )
+    report = _run_single(ctx, cfg, PhaseName.PRINT_PREP, print_options=options)
     _print_print_report(report)
     console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]")
+
+
+def _print_phase_summary(phase: PhaseName, result) -> None:
+    table = Table(title=f"{pipeline.PHASE_LABELS[phase]} summary")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    if phase == PhaseName.INGEST:
+        table.add_row("Total frames decoded", str(result.total_frames))
+        table.add_row("Accepted", f"[green]{result.accepted}[/green]")
+        table.add_row("Rejected: blur", str(result.rejected_blur))
+        table.add_row("Rejected: redundant", str(result.rejected_redundant))
+        table.add_row("Rejected: frame budget", str(result.rejected_budget))
+        table.add_row("Blur threshold used", f"{result.blur_threshold:.1f}")
+    elif phase == PhaseName.SFM_SPARSE:
+        rate = (
+            result.num_images_registered / result.num_images_total
+            if result.num_images_total
+            else 0.0
+        )
+        table.add_row(
+            "Registered images",
+            f"[green]{result.num_images_registered}/{result.num_images_total}[/green] ({rate:.0%})",
+        )
+        table.add_row("Mean reprojection error", f"{result.mean_reprojection_error_px:.3f} px")
+        table.add_row("Mean track length", f"{result.mean_track_length:.2f}")
+    elif phase == PhaseName.SFM_DENSE:
+        table.add_row("Backend", result.backend)
+        table.add_row("Dense points", f"[green]{result.num_points:,}[/green]")
+        if result.alignment_rmse is not None:
+            table.add_row("Mean alignment RMSE (1/units)", f"{result.alignment_rmse:.6g}")
+    elif phase == PhaseName.MESH:
+        table.add_row("Vertices", f"{result.num_vertices:,}")
+        table.add_row("Faces", f"{result.num_faces:,}")
+        table.add_row(
+            "Edge/vertex manifold",
+            "[green]yes[/green]" if result.is_manifold else "[yellow]no[/yellow]",
+        )
+    console.print(table)
 
 
 def _print_print_report(report) -> None:
@@ -454,14 +382,125 @@ def _print_print_report(report) -> None:
         console.print(f"[yellow]Warning:[/yellow] {warning}")
 
 
+def _progress_printer(ctx):
+    def on_progress(phase: PhaseName, status: PhaseStatus, message: str | None) -> None:
+        label = pipeline.PHASE_LABELS[phase]
+        if status == PhaseStatus.RUNNING:
+            console.print(f"[bold]▶ {label}[/bold]")
+        elif status == PhaseStatus.COMPLETE:
+            duration = ctx.manifest.phases[phase].duration_s or 0.0
+            console.print(f"[green]✓ {label}[/green] ({duration:.1f}s)")
+        elif status == PhaseStatus.SKIPPED:
+            console.print(f"[dim]↷ {label} — already complete, skipped[/dim]")
+
+    return on_progress
+
+
+_RERUN_FROM_OPT = typer.Option(
+    None, "--rerun-from", help="With --resume: redo this phase and everything after it."
+)
+_SET_OPT = typer.Option(
+    [],
+    "--set",
+    help="Config override, e.g. --set print_prep.slab_thickness_mm=5 (repeatable). On "
+    "--resume, only the phases that read the changed section re-run.",
+)
+
+
 @app.command(name="run")
 def run_cmd(
-    video: str,
-    preset: str = typer.Option("object", "--preset"),
-    resume: str | None = typer.Option(None, "--resume"),
+    video: str | None = typer.Argument(
+        None, help="Input video. Optional with --resume (pass it if the file moved)."
+    ),
+    preset: str | None = typer.Option(
+        None, "--preset", help="object | scene | fast (default: object). Fixed once a run starts."
+    ),
+    resume: str | None = typer.Option(
+        None, "--resume", help="Continue an existing run directory from its first unfinished phase."
+    ),
+    run_dir: str | None = typer.Option(
+        None, "--run-dir", help="Where to create a new run (default: runs/<timestamp>_<id>/)."
+    ),
+    rerun_from: PhaseName | None = _RERUN_FROM_OPT,
+    overrides: list[str] = _SET_OPT,
+    scale_factor: float | None = _SCALE_FACTOR_OPT,
+    scale_points: str | None = _SCALE_POINTS_OPT,
+    scale_distance_mm: float | None = _SCALE_DISTANCE_OPT,
+    aruco_image: str | None = _ARUCO_IMAGE_OPT,
+    aruco_marker_mm: float | None = _ARUCO_MM_OPT,
+    target_size_mm: float | None = _TARGET_SIZE_OPT,
+    skip_preflight: bool = typer.Option(
+        False, "--skip-preflight", help="Don't refuse a run the RAM/disk estimate says won't fit."
+    ),
 ) -> None:
-    """End-to-end pipeline: video in, model.stl out. (M6)"""
-    _not_implemented("run", "M6")
+    """End-to-end pipeline: video in, output/model.stl out. Resumable."""
+    options = _print_options(
+        scale_factor, scale_points, scale_distance_mm, aruco_image, aruco_marker_mm
+    )
+    try:
+        override_dict = pipeline.parse_overrides(overrides)
+        if target_size_mm is not None:
+            override_dict["print_prep.scale_target_size_mm"] = target_size_mm
+
+        if resume is not None:
+            if run_dir is not None:
+                console.print("[red]--resume and --run-dir are mutually exclusive.[/red]")
+                raise typer.Exit(code=1)
+            ctx, cfg = pipeline.prepare_resume(
+                Path(resume),
+                overrides=override_dict,
+                rerun_from=rerun_from,
+                video=Path(video) if video else None,
+                print_options=options,
+            )
+            if preset is not None and preset != ctx.manifest.preset:
+                console.print(
+                    f"[yellow]Note:[/yellow] this run uses preset '{ctx.manifest.preset}'; "
+                    f"--preset {preset} is ignored on --resume. Use --set to change settings."
+                )
+        else:
+            if video is None:
+                console.print("[red]Give a video to start a run, or --resume <run_dir>.[/red]")
+                raise typer.Exit(code=1)
+            if rerun_from is not None:
+                console.print("[red]--rerun-from only applies with --resume.[/red]")
+                raise typer.Exit(code=1)
+            ctx, cfg = pipeline.start_run(
+                Path(video),
+                preset or "object",
+                overrides=override_dict,
+                run_dir=Path(run_dir) if run_dir else None,
+                print_options=options,
+            )
+    except V2MError as exc:
+        _print_error("Can't start", exc)
+        raise typer.Exit(code=1) from exc
+
+    setup_logging(run_log_path=ctx.log_path)
+    console.print(f"Run directory: [bold]{ctx.run_dir}[/bold]  (preset {ctx.manifest.preset})")
+    try:
+        result = pipeline.run_pipeline(
+            ctx,
+            cfg,
+            on_progress=_progress_printer(ctx),
+            check_resources=not skip_preflight,
+        )
+    except V2MError as exc:
+        _print_error("Run failed", exc)
+        console.print(f"Report: [bold]{ctx.report_path}[/bold]")
+        console.print(f"Fix the cause, then: [bold]v2m run --resume {ctx.run_dir}[/bold]")
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        console.print(
+            f"\n[yellow]Interrupted.[/yellow] Continue with: v2m run --resume {ctx.run_dir}"
+        )
+        raise typer.Exit(code=130) from None
+
+    if result.print_report is not None:
+        _print_print_report(result.print_report)
+    console.print(f"Model: [bold]{ctx.output_dir / 'model.stl'}[/bold]")
+    if result.report_path is not None:
+        console.print(f"Report: [bold]{result.report_path}[/bold]")
 
 
 @app.command()

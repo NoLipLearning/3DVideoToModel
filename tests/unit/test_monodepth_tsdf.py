@@ -85,7 +85,7 @@ def test_build_tsdf_volume_resolution_is_within_configured_bounds(sfm_fixture):
     assert (
         monodepth_tsdf._MIN_TSDF_RESOLUTION
         <= volume.resolution
-        <= monodepth_tsdf._MAX_TSDF_RESOLUTION
+        <= monodepth_tsdf.MAX_TSDF_RESOLUTION
     )
 
 

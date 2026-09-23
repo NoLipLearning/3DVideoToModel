@@ -141,6 +141,39 @@ def _set_dot_path(data: dict[str, Any], dotted_key: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
+def _check_override_keys(overrides: dict[str, Any]) -> None:
+    """Reject a dot-path that names no config field. Pydantic ignores
+    unknown keys, so without this a typo like `print_prep.slab_thickness`
+    would silently do nothing."""
+    known = PipelineConfig().model_dump()
+    for dotted_key in overrides:
+        node: Any = known
+        for part in dotted_key.split("."):
+            if not isinstance(node, dict) or part not in node:
+                raise ConfigError(
+                    f"Unknown config key '{dotted_key}'.",
+                    remedy="Check the spelling against configs/default.yaml -- keys look like "
+                    "print_prep.slab_thickness_mm or ingest.frame_budget.",
+                )
+            node = node[part]
+
+
+def config_from_snapshot(
+    snapshot: dict[str, Any], overrides: dict[str, Any] | None = None
+) -> PipelineConfig:
+    """Rebuild a config from a run manifest's saved snapshot, applying
+    dot-path `overrides` on top. Used on `--resume`: the snapshot, not
+    configs/*.yaml, is the source of truth for an existing run."""
+    import copy
+
+    data = copy.deepcopy(snapshot)
+    if overrides:
+        _check_override_keys(overrides)
+        for dotted_key, value in overrides.items():
+            _set_dot_path(data, dotted_key, value)
+    return PipelineConfig.model_validate(data)
+
+
 def load_config(preset: str = "default", overrides: dict[str, Any] | None = None) -> PipelineConfig:
     """Load `preset` merged over `default.yaml`, then apply dot-path `overrides`."""
     merged = _load_yaml(CONFIG_DIR / "default.yaml")
@@ -158,6 +191,7 @@ def load_config(preset: str = "default", overrides: dict[str, Any] | None = None
     merged.setdefault("preset", preset)
 
     if overrides:
+        _check_override_keys(overrides)
         for dotted_key, value in overrides.items():
             _set_dot_path(merged, dotted_key, value)
 

@@ -191,9 +191,11 @@ def _sample_disparity(
 
 
 _MIN_TSDF_RESOLUTION = 32
-_MAX_TSDF_RESOLUTION = (
-    400  # resolution**3 voxels allocated upfront; caps memory (~400**3 * ~11B =~ 700MB)
-)
+# resolution**3 voxels are allocated upfront. Measured on open3d 0.20:
+# 48 bytes/voxel RSS (a 200**3 volume costs 384MB), so 400**3 is ~3.1GB --
+# preflight.py budgets for exactly this.
+MAX_TSDF_RESOLUTION = 400
+TSDF_BYTES_PER_VOXEL = 48
 _BBOX_TRIM_PERCENTILE = 0.02  # trim the outer 2% of points on each side before sizing the volume
 _BBOX_SAFETY_MARGIN = 1.3
 
@@ -239,7 +241,7 @@ def _build_tsdf_volume(
     per-voxel size this reconstruction's own extent actually resolves to
     after the resolution clamp above -- whatever scale that turns out to
     be. `resolution` itself needs no equivalent correction: clamping it
-    to [`_MIN_TSDF_RESOLUTION`, `_MAX_TSDF_RESOLUTION`] already absorbs
+    to [`_MIN_TSDF_RESOLUTION`, `MAX_TSDF_RESOLUTION`] already absorbs
     an arbitrary length/voxel_size_m ratio without reference to real
     units.
     """
@@ -262,9 +264,7 @@ def _build_tsdf_volume(
         2.0 * half_diagonal * _BBOX_SAFETY_MARGIN, config.tsdf_voxel_size_m * _MIN_TSDF_RESOLUTION
     )
     resolution = int(
-        np.clip(
-            round(length / config.tsdf_voxel_size_m), _MIN_TSDF_RESOLUTION, _MAX_TSDF_RESOLUTION
-        )
+        np.clip(round(length / config.tsdf_voxel_size_m), _MIN_TSDF_RESOLUTION, MAX_TSDF_RESOLUTION)
     )
     origin = center - length / 2.0
 

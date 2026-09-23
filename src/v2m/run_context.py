@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from v2m.errors import ResumeError
-from v2m.types import PhaseName, PhaseStatus, RunManifest
+from v2m.types import PhaseName, PhaseRecord, PhaseStatus, RunManifest
 
 RUNS_ROOT = Path("runs")
 
@@ -165,9 +165,16 @@ class RunContext:
         record.input_hash = input_hash
         record.started_at = datetime.now(UTC)
         record.error = None
+        record.remedy = None
         self.save()
 
-    def complete_phase(self, phase: PhaseName, *, artifacts: dict[str, str] | None = None) -> None:
+    def complete_phase(
+        self,
+        phase: PhaseName,
+        *,
+        artifacts: dict[str, str] | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
         record = self.manifest.phases[phase]
         record.status = PhaseStatus.COMPLETE
         record.finished_at = datetime.now(UTC)
@@ -175,14 +182,37 @@ class RunContext:
             record.duration_s = (record.finished_at - record.started_at).total_seconds()
         if artifacts:
             record.artifacts.update(artifacts)
+        if summary is not None:
+            record.summary = summary
         self.save()
 
-    def fail_phase(self, phase: PhaseName, error: str) -> None:
+    def fail_phase(self, phase: PhaseName, error: str, *, remedy: str | None = None) -> None:
         record = self.manifest.phases[phase]
         record.status = PhaseStatus.FAILED
         record.finished_at = datetime.now(UTC)
         record.error = error
+        record.remedy = remedy
         self.save()
+
+    def invalidate_from(self, phase: PhaseName) -> list[PhaseName]:
+        """Reset `phase` and every phase after it to PENDING, so the next
+        run re-executes them. Returns the phases that were actually
+        reset (the ones that weren't already PENDING).
+
+        Used when an input a phase depends on changes -- a config value
+        on `--resume --set`, or an explicit `--rerun-from`. Artifacts on
+        disk are left alone: each phase already clears its own stale
+        outputs when it starts.
+        """
+        order = list(PhaseName)
+        reset = []
+        for later in order[order.index(phase) :]:
+            record = self.manifest.phases[later]
+            if record.status != PhaseStatus.PENDING:
+                reset.append(later)
+            self.manifest.phases[later] = PhaseRecord()
+        self.save()
+        return reset
 
     def is_complete(self, phase: PhaseName) -> bool:
         return self.manifest.phases[phase].status == PhaseStatus.COMPLETE

@@ -50,6 +50,8 @@ libgomp1 libusb-1.0-0`. macOS wheels don't have this dependency at all.
 ```
 src/v2m/
   cli.py            Typer entrypoint -- one subcommand per phase, plus `run` (M6), `serve` (M7), `capture` (M8)
+  pipeline.py       run_phase() (the one place phase bookkeeping happens) + run_pipeline()/prepare_resume() (M6)
+  preflight.py      RAM/disk estimate before a run; refuses what can't fit (M6)
   config.py         Pydantic config models + configs/*.yaml loading + dot-path CLI overrides
   capability.py     Hardware/binary/library probe -- the ONLY place that decides "is CUDA available"
   run_context.py    RunContext: run directory layout, manifest.json read/write, --resume logic
@@ -62,7 +64,7 @@ src/v2m/
   phase4_print/     Surface -> watertight, scaled, printable solid (THE hard part -- see docs/ARCHITECTURE.md Section 3.3)
   capture/          Guided live-capture HUD (M8) -- feeds phase1, not a SLAM system
   web/              FastAPI local UI (M7)
-  report/           Per-run HTML report
+  report/           Per-run self-contained report.html (html.py) + software-rendered model preview (preview.py)
 ```
 
 ## Working conventions
@@ -77,10 +79,14 @@ src/v2m/
 - **`pymeshlab` is optional.** It's the heaviest, least portable
   dependency in the stack. Guard every import (`capability.py` reports it
   as present/absent) and always provide an open3d/trimesh fallback path.
-- **Write a manifest entry at the end of every phase**, via
-  `RunContext.complete_phase()` / `.fail_phase()`. Resumability is not
-  optional here — a 40-minute pipeline is unworkable to iterate on
-  without it.
+- **Write a manifest entry at the end of every phase** — in practice,
+  run phases through `pipeline.run_phase()`, which does the
+  start/complete/fail bookkeeping (plus the result `summary` and failure
+  `remedy`) for every caller: per-phase CLI commands, `v2m run`, the web
+  worker. Resumability is not optional here — a 40-minute pipeline is
+  unworkable to iterate on without it. If you add a config section or a
+  phase, update `pipeline._SECTION_FIRST_PHASE` so `--resume --set`
+  invalidates the right phases.
 - **Raise `V2MError` subclasses with a `remedy=`**, not bare exceptions,
   for anything a user needs to act on (bad footage, missing capability,
   stale resume state).
@@ -160,7 +166,7 @@ src/v2m/
 - [x] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
 - [x] M4 — Phase 3: raw mesh (Poisson)
 - [x] M5 — Phase 4: print-ready post-processing (the critical milestone)
-- [ ] M6 — end-to-end `v2m run` + `--resume`
+- [x] M6 — end-to-end `v2m run` + `--resume`
 - [ ] M7 — local web UI
 - [ ] M8 — guided live capture
 - [ ] M9 — optional quality backends (OpenMVS, hloc/ALIKED, tiling)

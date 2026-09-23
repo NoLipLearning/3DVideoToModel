@@ -54,6 +54,12 @@ class PhaseRecord(BaseModel):
     duration_s: float | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
+    remedy: str | None = None
+    # The phase's own result model (IngestSummary, SfmResult, ...) as
+    # plain JSON, so report/html.py and the web UI can show every phase's
+    # numbers from the manifest alone. Added at M6; older manifests
+    # without it load with an empty dict.
+    summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunManifest(BaseModel):
@@ -73,6 +79,10 @@ class RunManifest(BaseModel):
     phases: dict[PhaseName, PhaseRecord] = Field(
         default_factory=lambda: {phase: PhaseRecord() for phase in PhaseName}
     )
+    # Phase 4's per-capture scale inputs (--scale-factor, --scale-points,
+    # --aruco-*), kept so a --resume that reaches Phase 4 uses the same
+    # scale reference the run was started with. See pipeline.PrintOptions.
+    print_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class FrameRecord(BaseModel):
