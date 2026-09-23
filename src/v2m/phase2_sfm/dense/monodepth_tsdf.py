@@ -294,15 +294,30 @@ def densify(
     `depth_estimator` defaults to the real `TransformersDepthEstimator`;
     tests inject a synthetic stand-in (see module docstring).
     """
-    sparse_dir = sfm_dir / "sparse" / "final"
+    # The *undistorted* reconstruction, not sparse/final/: pycolmap's
+    # undistort_images() writes a second copy of the reconstruction here
+    # with each image's 2D keypoints reprojected into the undistorted
+    # pixel space and camera models updated to match (confirmed
+    # directly -- 3D points and poses are untouched, only per-image
+    # intrinsics/2D coordinates change). sparse/final/'s keypoint pixel
+    # coordinates are in the *original* (distorted) image space, which
+    # only happens to line up with the undistorted images on disk when a
+    # camera's estimated distortion is negligible. This project's own
+    # M1/M2 fixture initially had exactly that -- near-zero estimated
+    # distortion for every camera on a shallow orbit -- which is why
+    # this went uncaught until M5's fixture rework gave the poles enough
+    # elevation to make COLMAP's per-camera distortion estimate (and
+    # hence the undistorted canvas size/keypoint positions) actually
+    # diverge from the original.
+    undistorted_sparse_dir = sfm_dir / "undistorted" / "sparse"
     images_dir = sfm_dir / "undistorted" / "images"
-    if not sparse_dir.exists() or not images_dir.exists():
+    if not undistorted_sparse_dir.exists() or not images_dir.exists():
         raise SfMError(
             f"No completed sparse reconstruction found in {sfm_dir}.",
-            remedy="Run `v2m sfm` first to produce sparse/final/ and undistorted/images/.",
+            remedy="Run `v2m sfm` first to produce undistorted/sparse/ and undistorted/images/.",
         )
 
-    reconstruction = pycolmap.Reconstruction(sparse_dir)
+    reconstruction = pycolmap.Reconstruction(undistorted_sparse_dir)
     if depth_estimator is None:
         depth_estimator = TransformersDepthEstimator(config.depth_model)
 

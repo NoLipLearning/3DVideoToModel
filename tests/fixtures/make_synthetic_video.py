@@ -164,7 +164,19 @@ def _camera_pose(azimuth_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray
     around the cube at `azimuth_deg`, always looking at the origin, using
     OpenCV's convention (camera looks down +Z, X right, Y down)."""
     azimuth = np.radians(azimuth_deg)
-    height = 60.0 * np.sin(azimuth * 2.0)  # gentle bob, avoids a perfectly flat orbit
+    # Bob amplitude matters beyond "avoid a perfectly flat orbit": a
+    # shallow bob (originally 60mm, ~8.6 degrees of elevation) leaves the
+    # top/bottom faces almost edge-on for the whole orbit, so Phase 2b's
+    # dense reconstruction reconstructs them far less completely than the
+    # four equatorial side faces -- invisible to M1-M4's own verification
+    # (registration rate, mesh manifold-ness), but it surfaced directly at
+    # M5 as a ~27% foreshortened axis after watertight repair, large enough
+    # to fail the architecture doc's M5 bar ("cube round-trips to within 2%
+    # of ground-truth dimensions"). 220mm (~28.8 degrees of elevation) gives
+    # real, if still oblique, coverage of both poles across the orbit's two
+    # up/down cycles, without going so steep it weakens the equatorial
+    # faces' own already-verified registration.
+    height = 220.0 * np.sin(azimuth * 2.0)
     eye = np.array([CAMERA_RADIUS_MM * np.cos(azimuth), height, CAMERA_RADIUS_MM * np.sin(azimuth)])
     target = np.zeros(3)
     world_up = np.array([0.0, 1.0, 0.0])

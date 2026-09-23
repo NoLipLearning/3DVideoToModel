@@ -85,6 +85,8 @@ class PrintPrepConfig(BaseModel):
     ground_ransac_n: int = 3
     ground_ransac_iterations: int = 1000
     ground_min_inlier_ratio: float = 0.15
+    ground_min_gravity_agreement: float = 0.7
+    min_wall_thickness_mm: float = 0.8
     slab_thickness_mm: float = 3.0
     max_hole_size_triangles: int = 1000
     scale_target_size_mm: float = 150.0

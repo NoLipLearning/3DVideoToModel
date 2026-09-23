@@ -55,6 +55,8 @@ print_prep:
   ground_ransac_n: 3
   ground_ransac_iterations: 1000
   ground_min_inlier_ratio: 0.15
+  ground_min_gravity_agreement: 0.7        # cos(~45deg); |dot(plane_normal, gravity_up)| below this is not trusted as "the ground" regardless of inlier count -- see ground.py's find_ground_plane docstring
+  min_wall_thickness_mm: 0.8               # ~2x a typical 0.4mm FDM nozzle diameter; not itself specified numerically in the architecture doc
   slab_thickness_mm: 3.0                   # printable base thickness for scene mode
   max_hole_size_triangles: 1000            # largest hole the repair ladder attempts to fill directly (rung 3)
   scale_target_size_mm: 150.0              # fallback scale target when no metric reference is available

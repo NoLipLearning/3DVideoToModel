@@ -85,9 +85,25 @@ src/v2m/
   for anything a user needs to act on (bad footage, missing capability,
   stale resume state).
 - **Never hand-triangulate hole-filling for the print-ready base.**
-  Boolean half-space cut via `manifold3d` (Section 3.3) guarantees
-  manifold output; ad-hoc hole-filling is where these pipelines usually
-  break.
+  `phase4_print/watertight.py`'s rung 5 closes it with a voxel ground
+  cut (seal a floor layer, flood-fill, clear below the cut, marching
+  cubes), which is manifold by construction. Don't reach for a
+  `manifold3d` boolean on an *open* mesh: manifold3d requires closed
+  input and rejects boundary edges. Fan-filling a large non-convex
+  loop first to satisfy it produced garbage (both confirmed directly;
+  see `docs/ARCHITECTURE.md` M5).
+- **Anything that pairs images with COLMAP keypoints or intrinsics reads
+  `sfm/undistorted/sparse/`, not `sfm/sparse/final/`.** The images on
+  disk are the undistorted ones, and only that copy of the
+  reconstruction has matching keypoints and camera models (poses and 3D
+  points are identical in both). The two only coincide when a camera's
+  estimated distortion is ~0, which is how this went unnoticed through
+  M3.
+- **`trimesh` `VoxelGrid.marching_cubes` returns voxel-index
+  coordinates.** Always `apply_transform(voxels.transform)` afterwards.
+- **Compare reconstructed dimensions rotation-invariantly** (volume,
+  oriented bounding box). A model's heading about Z is arbitrary, so
+  axis-aligned extents conflate "wrong size" with "turned 45°".
 - **Verify pycolmap's API against the actually-installed version before
   writing code against it.** The modern `colmap/colmap/python` bindings
   (what `pip install pycolmap` gives you now) are a different, cleaner
@@ -143,7 +159,7 @@ src/v2m/
 - [x] M2 — Phase 2a: sparse SfM
 - [x] M3 — Phase 2b: dense point cloud (monodepth + TSDF)
 - [x] M4 — Phase 3: raw mesh (Poisson)
-- [ ] M5 — Phase 4: print-ready post-processing (the critical milestone)
+- [x] M5 — Phase 4: print-ready post-processing (the critical milestone)
 - [ ] M6 — end-to-end `v2m run` + `--resume`
 - [ ] M7 — local web UI
 - [ ] M8 — guided live capture

@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
@@ -39,7 +40,21 @@ class GeometricDepthEstimator:
         depth_mm = msv.render_true_depth(self._faces, rvec, tvec, cam_center, _CAMERA_MATRIX)
         with np.errstate(divide="ignore", invalid="ignore"):
             disparity = np.where(depth_mm > 1e-6, 1.0 / depth_mm, 0.0)
-        return disparity.astype(np.float32)
+        disparity = disparity.astype(np.float32)
+
+        # render_true_depth always renders at the fixture's fixed
+        # IMAGE_SIZE; COLMAP's per-image undistortion can crop to a
+        # slightly different size when its estimated SIMPLE_RADIAL `k`
+        # is non-trivial (steeper viewing angles -- e.g. the poles of an
+        # orbited object -- make this more likely). The real
+        # TransformersDepthEstimator always interpolates back to
+        # image_bgr's own resolution (see monodepth_tsdf.py), so this
+        # double must match that behavior to stand in for it faithfully.
+        if disparity.shape != image_bgr.shape[:2]:
+            disparity = cv2.resize(
+                disparity, (image_bgr.shape[1], image_bgr.shape[0]), interpolation=cv2.INTER_LINEAR
+            )
+        return disparity
 
 
 @pytest.fixture(scope="session")
@@ -88,3 +103,22 @@ def dense_fixture(sfm_fixture, tmp_path_factory) -> dict:
         depth_estimator=estimator,
     )
     return {"result": result, "output_dir": output_dir, "estimator": estimator}
+
+
+@pytest.fixture(scope="session")
+def mesh_fixture(sfm_fixture, dense_fixture, tmp_path_factory) -> dict:
+    """Runs Phase 3 once for the whole test session on top of
+    `dense_fixture` -- shared by test_mesh_build.py (M4) and
+    test_print_prep.py (M5)."""
+    from v2m.config import DenseConfig, MeshConfig
+    from v2m.phase3_mesh import build_mesh
+
+    output_dir = tmp_path_factory.mktemp("mesh_fixture")
+    report = build_mesh(
+        dense_fixture["output_dir"],
+        sfm_fixture["run_dir"] / "sfm",
+        output_dir,
+        DenseConfig(),
+        MeshConfig(),
+    )
+    return {"report": report, "output_dir": output_dir}
